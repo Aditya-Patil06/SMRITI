@@ -70,6 +70,7 @@ class HybridRetrievalEngine:
             query=query_clean,
             top_k=limit * 2,
             filter_fn=lambda m: (not project_id or m.get("project_id") == project_id) and
+                                (not workspace_id or m.get("workspace_id") == workspace_id) and
                                 (include_superseded or m.get("status") not in ["superseded", "forgotten"])
         )
 

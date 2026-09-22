@@ -1,7 +1,7 @@
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
-from smriti.models import Memory, MemoryVersion, AuditLog, Project, Task
+from smriti.models import Memory, MemoryVersion, AuditLog, Project, Task, Message, Conversation, ProviderAccount
 from smriti.schemas import ProvenanceExplanation
 from smriti.graph import graph_service
 
@@ -17,7 +17,6 @@ class MemoryManager:
                 if old.memory_type == cand.memory_type and cand.memory_type == "decision":
                     # Check for direct conflict or supersession
                     if old.statement.lower() != cand.statement.lower():
-                        # Mark diff
                         diffs.append({
                             "type": "SUPERSEDED_DECISION" if "instead of" in cand.statement.lower() else "CONFLICTING_DECISION",
                             "existing_id": old.id,
@@ -97,30 +96,57 @@ class MemoryManager:
         return mem
 
     def explain_memory(self, db: Session, memory_id: str) -> ProvenanceExplanation:
-        """Explains provenance: source conversation, message, extraction method, versions."""
+        """Explains full provenance: source message, conversation, provider account, extraction method, versions."""
         mem = db.query(Memory).filter(Memory.id == memory_id).first()
         if not mem:
             raise ValueError(f"Memory with ID {memory_id} not found")
 
+        is_manual = (mem.source_message_id is None and mem.source_conversation_id is None) or (mem.extraction_method == "user_explicit")
         source_msg_dict = None
         source_conv_dict = None
+        provider_account_dict = None
+        provider_name = None
         relevant_content = None
+        source_unavailable = False
 
-        if mem.source_message:
-            source_msg_dict = {
-                "id": mem.source_message.id,
-                "role": mem.source_message.role,
-                "created_at": mem.source_message.created_at,
-                "external_id": mem.source_message.external_id
-            }
-            relevant_content = mem.source_message.content
-            if mem.source_message.conversation:
-                source_conv_dict = {
-                    "id": mem.source_message.conversation.id,
-                    "title": mem.source_message.conversation.title,
-                    "created_at": mem.source_message.conversation.created_at,
-                    "provider": mem.source_message.conversation.provider_account.provider if mem.source_message.conversation.provider_account else "unknown"
+        if mem.source_message_id:
+            msg = db.query(Message).filter(Message.id == mem.source_message_id).first()
+            if msg:
+                source_msg_dict = {
+                    "id": msg.id,
+                    "role": msg.role,
+                    "created_at": msg.created_at,
+                    "external_id": msg.external_id
                 }
+                relevant_content = msg.content
+            else:
+                source_unavailable = True
+
+        conv_id = mem.source_conversation_id or (mem.source_message.conversation_id if mem.source_message else None)
+        if conv_id:
+            conv = db.query(Conversation).filter(Conversation.id == conv_id).first()
+            if conv:
+                if conv.is_deleted_source:
+                    source_unavailable = True
+                source_conv_dict = {
+                    "id": conv.id,
+                    "title": conv.title,
+                    "created_at": conv.created_at,
+                    "is_deleted_source": conv.is_deleted_source
+                }
+                if conv.provider_account:
+                    pa = conv.provider_account
+                    provider_name = pa.provider
+                    provider_account_dict = {
+                        "id": pa.id,
+                        "account_label": pa.account_label,
+                        "provider": pa.provider,
+                        "user_id": pa.user_id
+                    }
+                    source_conv_dict["provider"] = pa.provider
+                    source_conv_dict["account_label"] = pa.account_label
+            else:
+                source_unavailable = True
 
         versions = [
             {
@@ -141,6 +167,13 @@ class MemoryManager:
             confidence=mem.confidence,
             extraction_method=mem.extraction_method,
             created_at=mem.created_at,
+            workspace_id=mem.workspace_id,
+            project_id=mem.project_id,
+            is_manual=is_manual,
+            source_unavailable=source_unavailable,
+            superseded_by_id=mem.superseded_by_id,
+            provider=provider_name,
+            provider_account=provider_account_dict,
             source_conversation=source_conv_dict,
             source_message=source_msg_dict,
             relevant_source_content=relevant_content,
