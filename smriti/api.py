@@ -148,6 +148,12 @@ def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{ws_id}' not found")
 
+    if data.user_id and ws.user_id != data.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"User '{data.user_id}' does not own workspace '{ws_id}'"
+        )
+
     proj = Project(
         workspace_id=ws_id,
         name=data.name,
@@ -385,6 +391,11 @@ def import_conversations(
         pa = db.query(ProviderAccount).filter(ProviderAccount.id == provider_account_id).first()
         if not pa:
             raise HTTPException(status_code=404, detail=f"ProviderAccount '{provider_account_id}' not found")
+        if pa.user_id != ws.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"ProviderAccount user_id '{pa.user_id}' does not match Workspace user_id '{ws.user_id}'"
+            )
 
     normalized_convs = importer_registry.import_conversations(provider, payload)
     imported_ids = []

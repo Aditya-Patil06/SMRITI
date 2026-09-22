@@ -120,7 +120,7 @@ ProviderAccount
 Provider (ChatGPT / Claude / Gemini)
 ```
 
-For manually created memories, provenance explicitly designates them as `user_explicit` without fabricating artificial conversation records. If a source conversation is deleted, derived memories transition to `source_unavailable` rather than being silently purged.
+For manually created memories, provenance explicitly designates them as `user_explicit` without fabricating artificial conversation records. If a source conversation is deleted, the provenance and explain endpoints mark the source status as `source_unavailable` rather than silently purging or breaking the derived memory.
 
 ---
 

@@ -34,6 +34,24 @@ def test_db_session():
     yield session
     session.close()
 
+@pytest.fixture(autouse=True)
+def isolated_vector_store(tmp_path):
+    """Ensure vector_store is isolated per test with its own temporary storage file."""
+    orig_path = vector_store.storage_path
+    orig_vectors = dict(vector_store.vectors)
+    orig_metadata = dict(vector_store.metadata)
+
+    test_storage = str(tmp_path / "test_vectors.json")
+    vector_store.storage_path = test_storage
+    vector_store.vectors.clear()
+    vector_store.metadata.clear()
+
+    yield vector_store
+
+    vector_store.storage_path = orig_path
+    vector_store.vectors = orig_vectors
+    vector_store.metadata = orig_metadata
+
 @pytest.fixture
 def client(test_db_session):
     def override_get_db():
@@ -261,3 +279,75 @@ def test_workspace_isolation_in_search_and_context(client, test_db_session):
     ctx1 = client.get("/api/v1/context?query=messaging&workspace_id=ws-1").json()
     assert "Kafka" in ctx1["formatted_prompt"]
     assert "RabbitMQ" not in ctx1["formatted_prompt"]
+
+def test_provider_account_user_id_mismatch_validation(client, test_db_session):
+    # Create another user and their provider account
+    user2 = User(id="user-2", username="otheruser", email="other@smriti.local")
+    test_db_session.add(user2)
+    pa2 = ProviderAccount(id="pa-user2", user_id="user-2", provider="chatgpt", account_label="ChatGPT Account")
+    test_db_session.add(pa2)
+    test_db_session.commit()
+
+    # Attempt to import conversations into ws-1 (owned by user-1) using pa2 (owned by user-2)
+    payload = [{
+        "id": "conv-test-1",
+        "title": "Cross User Test",
+        "mapping": {}
+    }]
+    res = client.post("/api/v1/imports/conversations", params={
+        "provider": "chatgpt",
+        "workspace_id": "ws-1",
+        "provider_account_id": "pa-user2"
+    }, json=payload)
+    assert res.status_code == 400
+    assert "does not match Workspace user_id" in res.json()["detail"]
+
+def test_canonical_export_workspace_scoping(client, test_db_session):
+    # Seed project and memory in ws-1 and ws-2
+    p1 = Project(id="p-ws1", workspace_id="ws-1", name="Project 1")
+    p2 = Project(id="p-ws2", workspace_id="ws-2", name="Project 2")
+    m1 = Memory(id="m-ws1-scoped", workspace_id="ws-1", memory_type="decision", statement="WS1 memory", status="active")
+    m2 = Memory(id="m-ws2-scoped", workspace_id="ws-2", memory_type="decision", statement="WS2 memory", status="active")
+    test_db_session.add_all([p1, p2, m1, m2])
+    test_db_session.commit()
+
+    # Export ws-1 only
+    res = client.get("/api/v1/exports/canonical?workspace_id=ws-1")
+    assert res.status_code == 200
+    bundle = res.json()
+    assert bundle["manifest"]["workspace_id"] == "ws-1"
+
+    ws_ids = [w["id"] for w in bundle["workspaces"]]
+    assert ws_ids == ["ws-1"]
+
+    proj_ids = [p["id"] for p in bundle["projects"]]
+    assert "p-ws1" in proj_ids
+    assert "p-ws2" not in proj_ids
+
+    mem_ids = [m["id"] for m in bundle["memories"]]
+    assert "m-ws1-scoped" in mem_ids
+    assert "m-ws2-scoped" not in mem_ids
+
+def test_canonical_import_preflight_collision_rejection(client, test_db_session):
+    # Prepare a bundle where ws-1 is claimed by a different user
+    bundle = {
+        "manifest": {
+            "version": "1.1.0",
+            "entity_counts": {}
+        },
+        "workspaces": [
+            {
+                "id": "ws-1",
+                "user_id": "impostor-user",
+                "name": "Hijacked Workspace"
+            }
+        ]
+    }
+    res = client.post("/api/v1/imports/canonical", json=bundle)
+    assert res.status_code == 400
+    assert "Workspace collision" in res.json()["detail"]
+
+    # Verify db was untouched
+    ws1 = test_db_session.query(Workspace).filter(Workspace.id == "ws-1").first()
+    assert ws1.user_id == "user-1"
+

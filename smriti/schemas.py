@@ -103,6 +103,7 @@ class ProjectBase(BaseModel):
 
 class ProjectCreate(ProjectBase):
     workspace_id: Optional[str] = None
+    user_id: Optional[str] = None
 
 class ProjectRead(ProjectBase):
     id: str

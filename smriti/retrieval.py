@@ -101,7 +101,12 @@ class HybridRetrievalEngine:
         if results_map:
             top_ids = sorted(results_map.keys(), key=lambda k: results_map[k].score, reverse=True)[:3]
             for top_key in top_ids:
-                connected_ids = graph_service.find_connected_memories(top_key, max_hops=1)
+                connected_ids = graph_service.find_connected_memories(
+                    top_key,
+                    max_hops=1,
+                    workspace_id=workspace_id,
+                    project_id=project_id
+                )
                 for conn_id in connected_ids:
                     c_key = f"memory:{conn_id}"
                     if c_key in results_map:
@@ -109,6 +114,11 @@ class HybridRetrievalEngine:
                     else:
                         conn_mem = db.query(Memory).filter(Memory.id == conn_id).first()
                         if conn_mem and (include_superseded or conn_mem.status not in ["superseded", "forgotten"]):
+                            # Enforce workspace and project scope boundaries
+                            if workspace_id and conn_mem.workspace_id != workspace_id:
+                                continue
+                            if project_id and conn_mem.project_id != project_id:
+                                continue
                             results_map[c_key] = SearchResultItem(
                                 id=conn_mem.id,
                                 type="memory",
@@ -119,6 +129,7 @@ class HybridRetrievalEngine:
                                     "memory_type": conn_mem.memory_type,
                                     "status": conn_mem.status,
                                     "confidence": conn_mem.confidence,
+                                    "workspace_id": conn_mem.workspace_id,
                                     "project_id": conn_mem.project_id
                                 }
                             )

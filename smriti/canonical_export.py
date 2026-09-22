@@ -10,34 +10,82 @@ class CanonicalExportEngine:
     """Handles complete export and import of SMRITI memory state without semantic loss."""
 
     VERSION = "1.1.0"
+    DEFAULT_USER_ID = "default-user"
 
     def export_all(self, db: Session, workspace_id: Optional[str] = None) -> Dict[str, Any]:
-        users = db.query(User).all()
-        provider_accounts = db.query(ProviderAccount).all()
-
         ws_q = db.query(Workspace)
         if workspace_id:
             ws_q = ws_q.filter(Workspace.id == workspace_id)
         workspaces = ws_q.all()
         active_ws_ids = set(w.id for w in workspaces)
 
-        proj_q = db.query(Project).filter(Project.workspace_id.in_(active_ws_ids))
-        projects = proj_q.all()
-        active_proj_ids = set(p.id for p in projects)
+        if workspace_id:
+            # Workspace-scoped export: restrict all entities to those owned by or related to this workspace
+            target_user_ids = set(w.user_id for w in workspaces)
+            users = db.query(User).filter(User.id.in_(target_user_ids)).all()
+            provider_accounts = db.query(ProviderAccount).filter(ProviderAccount.user_id.in_(target_user_ids)).all()
+            pa_ids = set(pa.id for pa in provider_accounts)
 
-        tasks = db.query(Task).filter(Task.project_id.in_(active_proj_ids)).all()
-        memories = db.query(Memory).filter(Memory.workspace_id.in_(active_ws_ids)).all()
-        mem_ids = set(m.id for m in memories)
+            proj_q = db.query(Project).filter(Project.workspace_id.in_(active_ws_ids))
+            projects = proj_q.all()
+            active_proj_ids = set(p.id for p in projects)
 
-        memory_versions = db.query(MemoryVersion).filter(MemoryVersion.memory_id.in_(mem_ids)).all()
+            tasks = db.query(Task).filter(Task.project_id.in_(active_proj_ids)).all()
+            memories = db.query(Memory).filter(Memory.workspace_id.in_(active_ws_ids)).all()
+            mem_ids = set(m.id for m in memories)
 
-        conv_q = db.query(Conversation)
-        conversations = conv_q.all()
-        conv_ids = set(c.id for c in conversations)
+            memory_versions = db.query(MemoryVersion).filter(MemoryVersion.memory_id.in_(mem_ids)).all()
 
-        messages = db.query(Message).filter(Message.conversation_id.in_(conv_ids)).all()
-        edges = db.query(RelationshipEdge).all()
-        audit_logs = db.query(AuditLog).all()
+            # Conversations referenced by memories or provider accounts
+            mem_conv_ids = set(m.source_conversation_id for m in memories if m.source_conversation_id)
+            conv_q = db.query(Conversation).filter(
+                (Conversation.id.in_(mem_conv_ids)) | (Conversation.provider_account_id.in_(pa_ids))
+            )
+            conversations = conv_q.all()
+            conv_ids = set(c.id for c in conversations)
+
+            messages = db.query(Message).filter(Message.conversation_id.in_(conv_ids)).all()
+
+            # Edges where either source or target matches any scoped project, memory, or task
+            scoped_node_ids = (
+                set(f"project:{p.id}" for p in projects) |
+                set(f"memory:{m.id}" for m in memories) |
+                set(f"task:{t.id}" for t in tasks) |
+                active_ws_ids | active_proj_ids | mem_ids
+            )
+            all_edges = db.query(RelationshipEdge).all()
+            edges = [
+                e for e in all_edges
+                if e.source_id in scoped_node_ids or e.target_id in scoped_node_ids
+            ]
+
+            # Audit logs referencing scoped entities
+            all_audit = db.query(AuditLog).all()
+            audit_logs = [
+                a for a in all_audit
+                if a.entity_id in scoped_node_ids
+            ]
+        else:
+            # Full system export
+            users = db.query(User).all()
+            provider_accounts = db.query(ProviderAccount).all()
+            proj_q = db.query(Project).filter(Project.workspace_id.in_(active_ws_ids))
+            projects = proj_q.all()
+            active_proj_ids = set(p.id for p in projects)
+
+            tasks = db.query(Task).filter(Task.project_id.in_(active_proj_ids)).all()
+            memories = db.query(Memory).filter(Memory.workspace_id.in_(active_ws_ids)).all()
+            mem_ids = set(m.id for m in memories)
+
+            memory_versions = db.query(MemoryVersion).filter(MemoryVersion.memory_id.in_(mem_ids)).all()
+
+            conv_q = db.query(Conversation)
+            conversations = conv_q.all()
+            conv_ids = set(c.id for c in conversations)
+
+            messages = db.query(Message).filter(Message.conversation_id.in_(conv_ids)).all()
+            edges = db.query(RelationshipEdge).all()
+            audit_logs = db.query(AuditLog).all()
 
         manifest = {
             "version": self.VERSION,
@@ -226,9 +274,49 @@ class CanonicalExportEngine:
         if not version:
             raise ValueError("Manifest missing export schema version")
 
+    def preflight_check(self, db: Session, bundle: Dict[str, Any]):
+        """Perform read-only validation for ownership collisions or invalid hierarchies before writing anything."""
+        # 1. Workspace ownership collisions
+        for w_data in bundle.get("workspaces", []):
+            existing_ws = db.query(Workspace).filter(Workspace.id == w_data["id"]).first()
+            if existing_ws:
+                incoming_user = w_data.get("user_id") or self.DEFAULT_USER_ID
+                if existing_ws.user_id != incoming_user:
+                    raise ValueError(
+                        f"Workspace collision: workspace '{w_data['id']}' already exists and belongs to user '{existing_ws.user_id}', but import claims user '{incoming_user}'"
+                    )
+
+        # 2. Project workspace collisions
+        for p_data in bundle.get("projects", []):
+            existing_p = db.query(Project).filter(Project.id == p_data["id"]).first()
+            if existing_p:
+                if existing_p.workspace_id != p_data.get("workspace_id"):
+                    raise ValueError(
+                        f"Project collision: project '{p_data['id']}' already belongs to workspace '{existing_p.workspace_id}', not '{p_data.get('workspace_id')}'"
+                    )
+
+        # 3. Task project collisions
+        for t_data in bundle.get("tasks", []):
+            existing_t = db.query(Task).filter(Task.id == t_data["id"]).first()
+            if existing_t:
+                if existing_t.project_id != t_data.get("project_id"):
+                    raise ValueError(
+                        f"Task collision: task '{t_data['id']}' belongs to project '{existing_t.project_id}', not '{t_data.get('project_id')}'"
+                    )
+
+        # 4. Memory workspace collisions
+        for m_data in bundle.get("memories", []):
+            existing_m = db.query(Memory).filter(Memory.id == m_data["id"]).first()
+            if existing_m:
+                if existing_m.workspace_id != m_data.get("workspace_id"):
+                    raise ValueError(
+                        f"Memory collision: memory '{m_data['id']}' belongs to workspace '{existing_m.workspace_id}', not '{m_data.get('workspace_id')}'"
+                    )
+
     def import_all(self, db: Session, bundle: Dict[str, Any]) -> Dict[str, int]:
         from dateutil import parser
         self.validate_bundle(bundle)
+        self.preflight_check(db, bundle)
 
         counts = {
             "users": 0, "workspaces": 0, "provider_accounts": 0, "projects": 0,
@@ -241,6 +329,23 @@ class CanonicalExportEngine:
 
         # Atomic transaction
         try:
+            # 0. Ensure DEFAULT_USER_ID exists if any incoming workspace or provider account relies on it
+            needs_default_user = any(
+                not w.get("user_id") for w in bundle.get("workspaces", [])
+            ) or any(
+                not pa.get("user_id") for pa in bundle.get("provider_accounts", [])
+            )
+            if needs_default_user:
+                if not db.query(User).filter(User.id == self.DEFAULT_USER_ID).first():
+                    default_user = User(
+                        id=self.DEFAULT_USER_ID,
+                        username=self.DEFAULT_USER_ID,
+                        email=f"{self.DEFAULT_USER_ID}@smriti.local"
+                    )
+                    db.add(default_user)
+                    db.flush()
+                    counts["users"] += 1
+
             # 1. Users
             for u_data in bundle.get("users", []):
                 if not db.query(User).filter(User.id == u_data["id"]).first():
@@ -258,7 +363,7 @@ class CanonicalExportEngine:
                 if not db.query(Workspace).filter(Workspace.id == w_data["id"]).first():
                     w = Workspace(
                         id=w_data["id"],
-                        user_id=w_data.get("user_id") or "default-user",
+                        user_id=w_data.get("user_id") or self.DEFAULT_USER_ID,
                         name=w_data["name"],
                         description=w_data.get("description"),
                         is_default=w_data.get("is_default", False),
@@ -272,7 +377,7 @@ class CanonicalExportEngine:
                 if not db.query(ProviderAccount).filter(ProviderAccount.id == pa_data["id"]).first():
                     pa = ProviderAccount(
                         id=pa_data["id"],
-                        user_id=pa_data.get("user_id") or "default-user",
+                        user_id=pa_data.get("user_id") or self.DEFAULT_USER_ID,
                         provider=pa_data["provider"],
                         account_label=pa_data["account_label"],
                         auth_metadata=pa_data.get("auth_metadata", {}),

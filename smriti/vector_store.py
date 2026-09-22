@@ -63,7 +63,7 @@ class VectorStore:
             os.makedirs(dirname, exist_ok=True)
 
     def save(self):
-        """Persist vector index and metadata to disk."""
+        """Persist vector index and metadata to disk atomically using a temp file."""
         self._ensure_dir()
         serialized = {
             doc_id: {
@@ -72,8 +72,21 @@ class VectorStore:
             }
             for doc_id in self.vectors
         }
-        with open(self.storage_path, "w", encoding="utf-8") as f:
-            json.dump(serialized, f)
+        dirname = os.path.dirname(self.storage_path) or "."
+        temp_path = os.path.join(dirname, f".{os.path.basename(self.storage_path)}.tmp")
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(serialized, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, self.storage_path)
+        except Exception:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+            raise
 
     def load(self):
         """Load vector index and metadata from disk if present."""
@@ -138,10 +151,12 @@ class VectorStore:
             self.save()
 
     def rebuild_from_db(self, db: Session):
-        """Rebuild the entire derived vector index from canonical database records."""
+        """Rebuild the entire derived vector index from canonical database records safely using staged build."""
         from smriti.models import Memory
-        self.clear(auto_save=False)
         eligible_memories = db.query(Memory).filter(Memory.status != "forgotten").all()
+        staged_vectors: Dict[str, np.ndarray] = {}
+        staged_metadata: Dict[str, Dict[str, Any]] = {}
+
         for mem in eligible_memories:
             meta = {
                 "workspace_id": mem.workspace_id,
@@ -152,8 +167,12 @@ class VectorStore:
             }
             text_to_embed = f"{mem.statement} {mem.rationale or ''}"
             vec = np.array(self.embedding_service.embed(text_to_embed), dtype=np.float32)
-            self.vectors[mem.id] = vec
-            self.metadata[mem.id] = meta
+            staged_vectors[mem.id] = vec
+            staged_metadata[mem.id] = meta
+
+        # Only swap once all embeddings and queries succeeded
+        self.vectors = staged_vectors
+        self.metadata = staged_metadata
         self.save()
         return len(eligible_memories)
 
