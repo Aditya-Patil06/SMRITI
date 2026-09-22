@@ -80,7 +80,12 @@ class HybridRetrievalEngine:
             if key in results_map:
                 results_map[key].score += scaled_sim
             else:
-                mem = db.query(Memory).filter(Memory.id == doc_id).first()
+                mem_q = db.query(Memory).filter(Memory.id == doc_id)
+                if workspace_id:
+                    mem_q = mem_q.filter(Memory.workspace_id == workspace_id)
+                if project_id:
+                    mem_q = mem_q.filter(Memory.project_id == project_id)
+                mem = mem_q.first()
                 if mem and (include_superseded or mem.status not in ["superseded", "forgotten"]):
                     results_map[key] = SearchResultItem(
                         id=mem.id,
@@ -92,6 +97,7 @@ class HybridRetrievalEngine:
                             "memory_type": mem.memory_type,
                             "status": mem.status,
                             "confidence": mem.confidence,
+                            "workspace_id": mem.workspace_id,
                             "project_id": mem.project_id
                         }
                     )
@@ -112,13 +118,13 @@ class HybridRetrievalEngine:
                     if c_key in results_map:
                         results_map[c_key].score += 0.15
                     else:
-                        conn_mem = db.query(Memory).filter(Memory.id == conn_id).first()
+                        conn_mem_q = db.query(Memory).filter(Memory.id == conn_id)
+                        if workspace_id:
+                            conn_mem_q = conn_mem_q.filter(Memory.workspace_id == workspace_id)
+                        if project_id:
+                            conn_mem_q = conn_mem_q.filter(Memory.project_id == project_id)
+                        conn_mem = conn_mem_q.first()
                         if conn_mem and (include_superseded or conn_mem.status not in ["superseded", "forgotten"]):
-                            # Enforce workspace and project scope boundaries
-                            if workspace_id and conn_mem.workspace_id != workspace_id:
-                                continue
-                            if project_id and conn_mem.project_id != project_id:
-                                continue
                             results_map[c_key] = SearchResultItem(
                                 id=conn_mem.id,
                                 type="memory",

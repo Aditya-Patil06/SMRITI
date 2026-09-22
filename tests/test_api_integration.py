@@ -262,23 +262,41 @@ def test_vector_store_persistence_and_rebuild(tmp_path, test_db_session):
 
 def test_workspace_isolation_in_search_and_context(client, test_db_session):
     # Add memory in ws-1 and ws-2
-    m1 = Memory(id="m-ws1", workspace_id="ws-1", memory_type="decision", statement="Use Kafka in Workspace 1", status="active")
-    m2 = Memory(id="m-ws2", workspace_id="ws-2", memory_type="decision", statement="Use RabbitMQ in Workspace 2", status="active")
+    m1 = Memory(id="m-ws1", workspace_id="ws-1", project_id="p-alpha", memory_type="decision", statement="Use Kafka in Workspace 1", status="active")
+    m2 = Memory(id="m-ws2", workspace_id="ws-2", project_id="p-beta", memory_type="decision", statement="Use RabbitMQ in Workspace 2", status="active")
     test_db_session.add_all([m1, m2])
     test_db_session.commit()
 
-    vector_store.upsert(m1.id, m1.statement, {"workspace_id": "ws-1", "status": "active"})
-    vector_store.upsert(m2.id, m2.statement, {"workspace_id": "ws-2", "status": "active"})
+    vector_store.upsert(m1.id, m1.statement, {"workspace_id": "ws-1", "project_id": "p-alpha", "status": "active"})
+    vector_store.upsert(m2.id, m2.statement, {"workspace_id": "ws-2", "project_id": "p-beta", "status": "active"})
 
-    # Search scoped to ws-1
+    # 1. Search scoped to ws-1 returns ws-1 memory and excludes ws-2 memory
     res1 = client.get("/api/v1/search?query=queue&workspace_id=ws-1").json()
-    assert all(r["metadata"].get("workspace_id") == "ws-1" or "Kafka" in r["content"] for r in res1)
-    assert not any("RabbitMQ" in r["content"] for r in res1)
+    assert any(r["id"] == "m-ws1" for r in res1)
+    assert not any(r["id"] == "m-ws2" for r in res1)
+
+    # 2. Stale vector metadata simulation:
+    # Suppose vector store has stale metadata claiming m2 belongs to ws-1 (or filter_fn returns it)
+    vector_store.metadata["m-ws2"] = {"workspace_id": "ws-1", "project_id": "p-alpha", "status": "active"}
+    res_stale = client.get("/api/v1/search?query=RabbitMQ&workspace_id=ws-1").json()
+    # Database canonical scope check MUST prevent m-ws2 from being returned despite stale vector hit!
+    assert not any(r["id"] == "m-ws2" for r in res_stale)
+
+    # 3. Project scope enforcement at database lookup
+    res_proj = client.get("/api/v1/search?query=Kafka&workspace_id=ws-1&project_id=p-other").json()
+    assert not any(r["id"] == "m-ws1" for r in res_proj)
+
+    # 4. Unscoped search returns both
+    res_all = client.get("/api/v1/search?query=queue").json()
+    all_ids = [r["id"] for r in res_all]
+    assert "m-ws1" in all_ids
+    assert "m-ws2" in all_ids
 
     # Context scoped to ws-1
     ctx1 = client.get("/api/v1/context?query=messaging&workspace_id=ws-1").json()
     assert "Kafka" in ctx1["formatted_prompt"]
     assert "RabbitMQ" not in ctx1["formatted_prompt"]
+
 
 def test_provider_account_user_id_mismatch_validation(client, test_db_session):
     # Create another user and their provider account

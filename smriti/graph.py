@@ -55,13 +55,15 @@ class KnowledgeGraphService:
         # 3. Tasks
         task_q = db.query(Task)
         for t in task_q.all():
+            task_ws_id = t.project.workspace_id if t.project else None
             self.graph.add_node(
                 f"task:{t.id}",
                 node_type="task",
                 label=t.title,
                 status=t.status,
                 id=t.id,
-                project_id=t.project_id
+                project_id=t.project_id,
+                workspace_id=task_ws_id
             )
             self.graph.add_edge(
                 f"project:{t.project_id}",
@@ -157,7 +159,10 @@ class KnowledgeGraphService:
                         visited.add(nbr)
                         nbr_data = self.graph.nodes[nbr]
                         # Scope validation during traversal
-                        if workspace_id and nbr_data.get("workspace_id") and nbr_data.get("workspace_id") != workspace_id:
+                        if workspace_id and nbr_data.get("node_type") == "task":
+                            if nbr_data.get("workspace_id") != workspace_id:
+                                continue
+                        elif workspace_id and nbr_data.get("workspace_id") and nbr_data.get("workspace_id") != workspace_id:
                             continue
                         if project_id and nbr_data.get("project_id") and nbr_data.get("project_id") != project_id:
                             continue
