@@ -45,7 +45,7 @@ class ProjectIntelligenceService:
                 claim = m.structured_claim
                 pred = claim.get("predicate", "")
                 obj = claim.get("object", "")
-                if pred in ["uses_database", "uses_backend_framework", "uses_frontend_framework", "uses_technology", "uses_orm", "uses_language"]:
+                if pred in ["uses_database", "uses_backend_framework", "uses_frontend_framework", "uses_technology", "uses_orm", "uses_language", "uses_cache"]:
                     if obj:
                         derived_tech_stack.add(obj)
                 if pred in ["constrained_by", "requires_compliance"]:

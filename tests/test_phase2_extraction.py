@@ -115,3 +115,11 @@ def test_hybrid_extraction_engine_integration():
     for c in candidates:
         if c.structured_claim:
             assert c.structured_claim["object"] == ClaimNormalizer.normalize_token(c.structured_claim["object"])
+
+def test_redis_maps_to_uses_cache():
+    heuristic = MemoryExtractor()
+    cands = heuristic.extract_from_message("assistant", "We decided to use Redis for session caching.")
+    assert len(cands) >= 1
+    redis_cand = next((c for c in cands if c.structured_claim and c.structured_claim.get("object") == "redis"), None)
+    assert redis_cand is not None
+    assert redis_cand.structured_claim["predicate"] == "uses_cache"

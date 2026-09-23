@@ -393,13 +393,17 @@ def test_phase2_api_synthesize_and_milestones(client, test_db_session):
     assert data["status"] == "success"
     assert "fastapi" in data["synthesis"]["tech_stack"]
 
-    # Call milestones endpoint
+    # Call milestones endpoint twice to verify read-only behavior
     ml_res = client.get(f"/api/v1/projects/{p_id}/milestones")
     assert ml_res.status_code == 200
     milestones = ml_res.json()
     assert len(milestones) >= 1
     types = [ml["milestone_type"] for ml in milestones]
     assert "project_created" in types
+
+    ml_res_again = client.get(f"/api/v1/projects/{p_id}/milestones")
+    assert ml_res_again.status_code == 200
+    assert len(ml_res_again.json()) == len(milestones)
 
 def test_phase2_api_conflicts_and_resolution_flow(client, test_db_session):
     # Create project and two competing memories
@@ -444,6 +448,12 @@ def test_phase2_api_conflicts_and_resolution_flow(client, test_db_session):
     )
     assert res_flow.status_code == 200
     assert res_flow.json()["status"] == "success"
+
+    # Verify both m1 and m2 are in vector store with active status
+    assert m1_id in vector_store.metadata
+    assert vector_store.metadata[m1_id]["status"] == "active"
+    assert m2_id in vector_store.metadata
+    assert vector_store.metadata[m2_id]["status"] == "active"
 
 def test_phase2_canonical_export_import_roundtrip(client, test_db_session):
     p_res = client.post("/api/v1/projects", json={"workspace_id": "ws-1", "name": "Roundtrip Project"})

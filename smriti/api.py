@@ -9,7 +9,7 @@ import json
 from smriti.config import settings
 from smriti.models import (
     init_db, get_db, User, Workspace, ProviderAccount,
-    Conversation, Message, Project, Task, Memory, RelationshipEdge, AuditLog
+    Conversation, Message, Project, Task, Milestone, Memory, RelationshipEdge, AuditLog
 )
 from smriti.schemas import (
     UserRead, WorkspaceRead, WorkspaceCreate,
@@ -63,7 +63,7 @@ app.add_middleware(
 )
 
 extractor = MemoryExtractor()
-hybrid_extractor = HybridExtractionEngine(heuristic_extractor=extractor)
+hybrid_extractor = HybridExtractionEngine(heuristic_extractor=extractor, llm_extractor=None)
 
 # --- Global Exception Handling ---
 @app.exception_handler(ValueError)
@@ -202,7 +202,7 @@ def list_project_milestones(project_id: str, db: Session = Depends(get_db)):
     proj = db.query(Project).filter(Project.id == project_id).first()
     if not proj:
         raise HTTPException(status_code=404, detail="Project not found")
-    return project_intelligence_service.detect_milestones(db, project_id)
+    return db.query(Milestone).filter(Milestone.project_id == project_id).order_by(Milestone.reached_at.asc()).all()
 
 # --- Tasks ---
 @app.post("/api/v1/tasks", response_model=TaskRead, status_code=status.HTTP_201_CREATED)
@@ -326,6 +326,15 @@ def create_memory(data: MemoryCreate, db: Session = Depends(get_db)):
     if not data.source_message_id and not data.source_conversation_id:
         extraction_method = "user_explicit"
 
+    claim_data = None
+    if data.structured_claim is not None:
+        if hasattr(data.structured_claim, "model_dump"):
+            claim_data = data.structured_claim.model_dump()
+        elif isinstance(data.structured_claim, dict):
+            claim_data = data.structured_claim
+        else:
+            claim_data = dict(data.structured_claim)
+
     mem = Memory(
         workspace_id=ws_id,
         project_id=data.project_id,
@@ -334,7 +343,7 @@ def create_memory(data: MemoryCreate, db: Session = Depends(get_db)):
         memory_type=data.memory_type,
         statement=data.statement,
         rationale=data.rationale,
-        structured_claim=data.structured_claim,
+        structured_claim=claim_data,
         details=data.details or {},
         status=data.status,
         confidence=data.confidence,
@@ -394,6 +403,19 @@ def resolve_conflict_flow(
                 f"{mem.statement} {mem.rationale or ''}",
                 {"workspace_id": mem.workspace_id, "project_id": mem.project_id, "status": mem.status}
             )
+
+        if paired_memory_id:
+            paired_mem = db.query(Memory).filter(Memory.id == paired_memory_id).first()
+            if paired_mem:
+                if paired_mem.status == "forgotten":
+                    vector_store.delete(paired_mem.id)
+                else:
+                    vector_store.upsert(
+                        paired_mem.id,
+                        f"{paired_mem.statement} {paired_mem.rationale or ''}",
+                        {"workspace_id": paired_mem.workspace_id, "project_id": paired_mem.project_id, "status": paired_mem.status}
+                    )
+
         graph_service.sync_from_db(db)
         return {"status": "success", "resolved_memory": mem.id, "action": resolution_action}
     except ValueError as e:
@@ -425,6 +447,19 @@ def resolve_memory_conflict(
                 f"{mem.statement} {mem.rationale or ''}",
                 {"workspace_id": mem.workspace_id, "project_id": mem.project_id, "status": mem.status}
             )
+
+        if paired_memory_id:
+            paired_mem = db.query(Memory).filter(Memory.id == paired_memory_id).first()
+            if paired_mem:
+                if paired_mem.status == "forgotten":
+                    vector_store.delete(paired_mem.id)
+                else:
+                    vector_store.upsert(
+                        paired_mem.id,
+                        f"{paired_mem.statement} {paired_mem.rationale or ''}",
+                        {"workspace_id": paired_mem.workspace_id, "project_id": paired_mem.project_id, "status": paired_mem.status}
+                    )
+
         graph_service.sync_from_db(db)
         return mem
     except ValueError as e:

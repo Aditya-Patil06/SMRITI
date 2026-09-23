@@ -164,25 +164,38 @@ export interface ProviderCapability {
 
 const API_BASE = "http://localhost:8000/api/v1";
 
+async function fetchJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
+  const res = await fetch(input, init);
+  if (!res.ok) {
+    let errorDetail = res.statusText;
+    try {
+      const errData = await res.json();
+      if (errData && errData.detail) {
+        errorDetail = typeof errData.detail === "string" ? errData.detail : JSON.stringify(errData.detail);
+      }
+    } catch {
+      // Keep res.statusText if body is not JSON
+    }
+    throw new Error(`API Error [${res.status}]: ${errorDetail}`);
+  }
+  return res.json();
+}
+
 export const api = {
   async getDashboard(): Promise<DashboardStats> {
-    const res = await fetch(`${API_BASE}/dashboard/stats`);
-    if (!res.ok) throw new Error("Failed to fetch dashboard stats");
-    return res.json();
+    return fetchJson<DashboardStats>(`${API_BASE}/dashboard/stats`);
   },
 
   async getProjects(): Promise<Project[]> {
-    const res = await fetch(`${API_BASE}/projects`);
-    return res.json();
+    return fetchJson<Project[]>(`${API_BASE}/projects`);
   },
 
   async createProject(data: Partial<Project>): Promise<Project> {
-    const res = await fetch(`${API_BASE}/projects`, {
+    return fetchJson<Project>(`${API_BASE}/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     });
-    return res.json();
   },
 
   async getMemories(projectId?: string, status?: string): Promise<Memory[]> {
@@ -191,66 +204,62 @@ export const api = {
     if (projectId) params.append("project_id", projectId);
     if (status) params.append("status", status);
     if (params.toString()) url += `?${params.toString()}`;
-    const res = await fetch(url);
-    return res.json();
+    return fetchJson<Memory[]>(url);
   },
 
   async explainMemory(id: string): Promise<ProvenanceExplanation> {
-    const res = await fetch(`${API_BASE}/memories/${id}/explain`);
-    return res.json();
+    return fetchJson<ProvenanceExplanation>(`${API_BASE}/memories/${encodeURIComponent(id)}/explain`);
   },
 
   async resolveMemory(id: string, action: string, reason?: string): Promise<Memory> {
-    const url = `${API_BASE}/memories/${id}/resolve?resolution_action=${action}${reason ? `&reason=${encodeURIComponent(reason)}` : ""}`;
-    const res = await fetch(url, { method: "POST" });
-    return res.json();
+    const params = new URLSearchParams();
+    params.append("resolution_action", action);
+    if (reason) params.append("reason", reason);
+    const url = `${API_BASE}/memories/${encodeURIComponent(id)}/resolve?${params.toString()}`;
+    return fetchJson<Memory>(url, { method: "POST" });
   },
 
   async getConversations(): Promise<Conversation[]> {
-    const res = await fetch(`${API_BASE}/conversations`);
-    return res.json();
+    return fetchJson<Conversation[]>(`${API_BASE}/conversations`);
   },
 
   async importConversations(provider: string, data: any, projectId?: string): Promise<any> {
-    let url = `${API_BASE}/imports/conversations?provider=${provider}`;
-    if (projectId) url += `&project_id=${projectId}`;
-    const res = await fetch(url, {
+    const params = new URLSearchParams();
+    params.append("provider", provider);
+    if (projectId) params.append("project_id", projectId);
+    const url = `${API_BASE}/imports/conversations?${params.toString()}`;
+    return fetchJson<any>(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     });
-    return res.json();
   },
 
   async getContextPackage(query: string, projectId?: string): Promise<ContextPackage> {
-    let url = `${API_BASE}/context?query=${encodeURIComponent(query)}`;
-    if (projectId) url += `&project_id=${projectId}`;
-    const res = await fetch(url);
-    return res.json();
+    const params = new URLSearchParams();
+    params.append("query", query);
+    if (projectId) params.append("project_id", projectId);
+    return fetchJson<ContextPackage>(`${API_BASE}/context?${params.toString()}`);
   },
 
   async getKnowledgeGraph(): Promise<GraphData> {
-    const res = await fetch(`${API_BASE}/graph`);
-    return res.json();
+    return fetchJson<GraphData>(`${API_BASE}/graph`);
   },
 
   async getCapabilities(): Promise<ProviderCapability[]> {
-    const res = await fetch(`${API_BASE}/providers/capabilities`);
-    return res.json();
+    return fetchJson<ProviderCapability[]>(`${API_BASE}/providers/capabilities`);
   },
 
   async exportCanonical(): Promise<any> {
-    const res = await fetch(`${API_BASE}/exports/canonical`);
-    return res.json();
+    return fetchJson<any>(`${API_BASE}/exports/canonical`);
   },
 
   async importCanonical(payload: any): Promise<any> {
-    const res = await fetch(`${API_BASE}/imports/canonical`, {
+    return fetchJson<any>(`${API_BASE}/imports/canonical`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    return res.json();
   },
 
   async getConflicts(workspaceId?: string, projectId?: string): Promise<ConflictItem[]> {
@@ -259,8 +268,7 @@ export const api = {
     if (workspaceId) params.append("workspace_id", workspaceId);
     if (projectId) params.append("project_id", projectId);
     if (params.toString()) url += `?${params.toString()}`;
-    const res = await fetch(url);
-    return res.json();
+    return fetchJson<ConflictItem[]>(url);
   },
 
   async resolveConflictFlow(
@@ -276,12 +284,10 @@ export const api = {
     if (pairedMemoryId) params.append("paired_memory_id", pairedMemoryId);
     if (supersededById) params.append("superseded_by_id", supersededById);
     if (reason) params.append("reason", reason);
-    const res = await fetch(`${API_BASE}/conflicts/resolve?${params.toString()}`, { method: "POST" });
-    return res.json();
+    return fetchJson<any>(`${API_BASE}/conflicts/resolve?${params.toString()}`, { method: "POST" });
   },
 
   async synthesizeProject(projectId: string): Promise<any> {
-    const res = await fetch(`${API_BASE}/projects/${projectId}/synthesize`, { method: "POST" });
-    return res.json();
+    return fetchJson<any>(`${API_BASE}/projects/${encodeURIComponent(projectId)}/synthesize`, { method: "POST" });
   }
 };

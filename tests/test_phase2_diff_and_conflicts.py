@@ -212,3 +212,59 @@ def test_interactive_conflict_resolution_actions(db_session):
         reason="Forgotten"
     )
     assert res_forget.status == "forgotten"
+
+def test_multi_valued_predicates_coexistence(db_session):
+    diff_engine = MemoryDiffEngine()
+
+    existing = [
+        Memory(
+            id="mem-tech-1",
+            workspace_id="ws-1",
+            project_id="p1",
+            memory_type="technology",
+            statement="Uses technology: Python",
+            structured_claim={
+                "subject": "project",
+                "predicate": "uses_technology",
+                "object": "python"
+            },
+            status="active",
+            confidence=0.95
+        )
+    ]
+
+    # Another technology on the same project subject should coexist, not conflict
+    new_tech = ExtractedCandidate(
+        memory_type="technology",
+        statement="Uses technology: FastAPI",
+        structured_claim={
+            "subject": "project",
+            "predicate": "uses_technology",
+            "object": "fastapi"
+        },
+        confidence=0.95
+    )
+    diff = diff_engine.classify_diff(new_tech, existing, "ws-1", "p1")
+    assert diff.change_type == "COEXISTING"
+    assert not diff.review_required
+
+def test_single_review_with_structured_claim(db_session):
+    manager = MemoryManager()
+
+    m_low = Memory(
+        id="mem-low-1",
+        workspace_id="ws-1",
+        project_id="p1",
+        memory_type="decision",
+        statement="Uncertain architectural approach",
+        structured_claim={"subject": "architecture", "predicate": "uses_approach", "object": "event_driven"},
+        status="review_required",
+        confidence=0.75
+    )
+    db_session.add(m_low)
+    db_session.commit()
+
+    conflicts = manager.get_conflicts(db_session, "ws-1", "p1")
+    assert len(conflicts) == 1
+    assert conflicts[0]["type"] == "SINGLE_REVIEW"
+    assert conflicts[0]["memory_a"]["id"] == "mem-low-1"

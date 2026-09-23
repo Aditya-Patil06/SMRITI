@@ -87,7 +87,7 @@ class ClaimNormalizer:
         if not token:
             return ""
         cleaned = token.strip().lower()
-        cleaned = re.sub(r"[_\-]+", " ", cleaned)
+        cleaned = re.sub(r"[-_]+", " ", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cls.SYNONYM_MAP.get(cleaned, cleaned)
 
@@ -96,7 +96,7 @@ class ClaimNormalizer:
         if not predicate:
             return "relates_to"
         cleaned = predicate.strip().lower()
-        cleaned = re.sub(r"[_\-]+", " ", cleaned)
+        cleaned = re.sub(r"[-_]+", " ", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cls.PREDICATE_MAP.get(cleaned, cleaned.replace(" ", "_"))
 
@@ -373,7 +373,12 @@ class MemoryExtractor:
                     claim = None
                     for tech_match in self.TECH_PATTERNS[0].finditer(stmt_clean):
                         tech = ClaimNormalizer.normalize_token(tech_match.group(1))
-                        pred = "uses_database" if tech in ["postgresql", "sqlite", "mongodb", "redis"] else "uses_technology"
+                        if tech == "redis":
+                            pred = "uses_cache"
+                        elif tech in ["postgresql", "sqlite", "mongodb"]:
+                            pred = "uses_database"
+                        else:
+                            pred = "uses_technology"
                         claim = {
                             "subject": "project",
                             "predicate": pred,
@@ -449,7 +454,12 @@ class MemoryExtractor:
                 tech_name = ClaimNormalizer.normalize_token(raw_tech)
                 if tech_name not in seen_tech:
                     seen_tech.add(tech_name)
-                    pred = "uses_database" if tech_name in ["postgresql", "sqlite", "mongodb", "redis"] else "uses_technology"
+                    if tech_name == "redis":
+                        pred = "uses_cache"
+                    elif tech_name in ["postgresql", "sqlite", "mongodb"]:
+                        pred = "uses_database"
+                    else:
+                        pred = "uses_technology"
                     candidates.append(ExtractedCandidate(
                         memory_type="technology",
                         statement=f"Uses technology: {raw_tech}",
@@ -480,7 +490,7 @@ class HybridExtractionEngine:
 
     def __init__(self, heuristic_extractor: Optional[MemoryExtractor] = None, llm_extractor: Optional[BaseLLMExtractor] = None):
         self.heuristic_extractor = heuristic_extractor or MemoryExtractor()
-        self.llm_extractor = llm_extractor or MockLLMExtractor(mode="normal")
+        self.llm_extractor = llm_extractor
 
     def extract(self, role: str, content: str, use_llm: bool = True, context: Optional[Dict[str, Any]] = None) -> List[ExtractedCandidate]:
         results: List[ExtractedCandidate] = []

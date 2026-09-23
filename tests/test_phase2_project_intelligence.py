@@ -124,3 +124,53 @@ def test_idempotent_milestone_detection(db_session):
 
     milestones_3 = service.detect_milestones(db_session, "p1")
     assert len(milestones_3) == count_1 + 1
+
+def test_synthesis_ignores_superseded_and_forgotten(db_session):
+    service = ProjectIntelligenceService()
+
+    proj = Project(
+        id="p-sup",
+        workspace_id="ws-1",
+        name="Superseded Project",
+        status="active"
+    )
+    db_session.add(proj)
+    db_session.commit()
+
+    # Active memory
+    m_active = Memory(
+        id="m-act",
+        workspace_id="ws-1",
+        project_id="p-sup",
+        memory_type="technology",
+        statement="Uses technology: PostgreSQL",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "postgresql"},
+        status="active"
+    )
+    # Superseded memory
+    m_sup = Memory(
+        id="m-sup",
+        workspace_id="ws-1",
+        project_id="p-sup",
+        memory_type="technology",
+        statement="Uses technology: MongoDB",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "mongodb"},
+        status="superseded"
+    )
+    # Forgotten memory
+    m_forg = Memory(
+        id="m-forg",
+        workspace_id="ws-1",
+        project_id="p-sup",
+        memory_type="technology",
+        statement="Uses technology: SQLite",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "sqlite"},
+        status="forgotten"
+    )
+    db_session.add_all([m_active, m_sup, m_forg])
+    db_session.commit()
+
+    res = service.synthesize_project_state(db_session, "p-sup")
+    assert "postgresql" in res["tech_stack"]
+    assert "mongodb" not in res["tech_stack"]
+    assert "sqlite" not in res["tech_stack"]

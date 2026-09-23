@@ -45,25 +45,11 @@ class MemoryManager:
 
         conflicts = []
         seen_pairs = set()
+        paired_memory_ids = set()
 
+        # 1. Identify pairs of competing claims
         for i, m1 in enumerate(memories):
             if not m1.structured_claim:
-                # If memory is review_required on its own
-                if m1.status == "review_required":
-                    conflicts.append({
-                        "id": f"single_{m1.id}",
-                        "type": "SINGLE_REVIEW",
-                        "memory_a": {
-                            "id": m1.id,
-                            "statement": m1.statement,
-                            "status": m1.status,
-                            "confidence": m1.confidence,
-                            "structured_claim": m1.structured_claim,
-                            "created_at": m1.created_at.isoformat() if m1.created_at else None
-                        },
-                        "memory_b": None,
-                        "reason": "Low confidence or unverified extraction requiring user confirmation"
-                    })
                 continue
 
             claim1 = m1.structured_claim
@@ -78,9 +64,13 @@ class MemoryManager:
                     and claim1.get("predicate") == claim2.get("predicate")
                     and claim1.get("object") != claim2.get("object")
                 ):
+                    # If both are active and already confirmed (e.g. via keep_both), do not re-flag
+                    # Only flag if at least one is review_required OR scopes overlap without confirmation
                     pair_key = tuple(sorted([m1.id, m2.id]))
                     if pair_key not in seen_pairs:
                         seen_pairs.add(pair_key)
+                        paired_memory_ids.add(m1.id)
+                        paired_memory_ids.add(m2.id)
                         conflicts.append({
                             "id": f"pair_{m1.id}_{m2.id}",
                             "type": "CLAIM_CONFLICT",
@@ -106,6 +96,24 @@ class MemoryManager:
                             },
                             "reason": f"Competing values for '{claim1.get('subject')}.{claim1.get('predicate')}': '{claim1.get('object')}' vs '{claim2.get('object')}'"
                         })
+
+        # 2. Add unpaired review_required memories as SINGLE_REVIEW
+        for m in memories:
+            if m.status == "review_required" and m.id not in paired_memory_ids:
+                conflicts.append({
+                    "id": f"single_{m.id}",
+                    "type": "SINGLE_REVIEW",
+                    "memory_a": {
+                        "id": m.id,
+                        "statement": m.statement,
+                        "status": m.status,
+                        "confidence": m.confidence,
+                        "structured_claim": m.structured_claim,
+                        "created_at": m.created_at.isoformat() if m.created_at else None
+                    },
+                    "memory_b": None,
+                    "reason": "Low confidence or unverified extraction requiring user confirmation"
+                })
 
         return conflicts
 

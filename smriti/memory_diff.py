@@ -32,6 +32,15 @@ class MemoryDiffEngine:
         "replaced by", "replaces", "deprecated in favor of", "supersedes", "superseded"
     ]
 
+    MULTI_VALUED_PREDICATES = {
+        "uses",
+        "uses_technology",
+        "relates_to",
+        "constrained_by",
+        "uses_cache",
+        "requires_compliance"
+    }
+
     def classify_diff(
         self,
         candidate: ExtractedCandidate,
@@ -93,7 +102,7 @@ class MemoryDiffEngine:
 
             # If explicit replaces target matches
             if cand_replaces:
-                if cand_replaces in old.statement.lower() or (old_claim and cand_replaces == old_claim.get("object")):
+                if (old_claim and cand_replaces == old_claim.get("object")) or (cand_replaces in old.statement.lower()):
                     return DiffResult(
                         change_type="SUPERSEDED",
                         candidate_statement=candidate.statement,
@@ -106,21 +115,9 @@ class MemoryDiffEngine:
                     )
 
             if has_replacement_kw:
-                # If old statement content is mentioned as replaced
-                if old.statement.lower() in cand_stmt_lower:
-                    return DiffResult(
-                        change_type="SUPERSEDED",
-                        candidate_statement=candidate.statement,
-                        existing_memory_id=old.id,
-                        existing_statement=old.statement,
-                        reason="Replacement keyword detected referencing previous statement",
-                        confidence=0.93,
-                        review_required=False,
-                        evidence={"indicator": "replacement_keyword"}
-                    )
-                # If old object is in candidate statement
+                # If old object is in candidate statement and subject/predicate align
                 if old_claim and old_claim.get("object") and old_claim.get("object") in cand_stmt_lower:
-                    if cand_claim and cand_claim.get("subject") == old_claim.get("subject") and cand_claim.get("predicate") == old_claim.get("predicate"):
+                    if not cand_claim or (cand_claim.get("subject") == old_claim.get("subject") and cand_claim.get("predicate") == old_claim.get("predicate")):
                         return DiffResult(
                             change_type="SUPERSEDED",
                             candidate_statement=candidate.statement,
@@ -131,6 +128,18 @@ class MemoryDiffEngine:
                             review_required=False,
                             evidence={"superseded_object": old_claim.get("object")}
                         )
+                # If old statement content is mentioned as replaced
+                elif old.statement.lower() in cand_stmt_lower:
+                    return DiffResult(
+                        change_type="SUPERSEDED",
+                        candidate_statement=candidate.statement,
+                        existing_memory_id=old.id,
+                        existing_statement=old.statement,
+                        reason="Replacement keyword detected referencing previous statement",
+                        confidence=0.93,
+                        review_required=False,
+                        evidence={"indicator": "replacement_keyword"}
+                    )
 
         # 3. Check for SAME SUBJECT + SAME PREDICATE + DIFFERENT OBJECT
         if cand_claim:
@@ -146,6 +155,19 @@ class MemoryDiffEngine:
                     and cand_claim.get("predicate") == old_claim.get("predicate")
                     and cand_claim.get("object") != old_claim.get("object")
                 ):
+                    # Check if the predicate naturally supports multiple coexisting values
+                    predicate = cand_claim.get("predicate")
+                    if predicate in self.MULTI_VALUED_PREDICATES:
+                        return DiffResult(
+                            change_type="COEXISTING",
+                            candidate_statement=candidate.statement,
+                            existing_memory_id=old.id,
+                            existing_statement=old.statement,
+                            reason=f"Predicate '{predicate}' naturally supports multiple coexisting values",
+                            confidence=candidate.confidence,
+                            review_required=False,
+                            evidence={"multi_valued_predicate": predicate}
+                        )
                     cand_scope = cand_claim.get("scope") or {}
                     old_scope = old_claim.get("scope") or {}
 
