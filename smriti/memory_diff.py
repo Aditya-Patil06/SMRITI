@@ -1,3 +1,4 @@
+import re
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -40,6 +41,174 @@ class MemoryDiffEngine:
         "uses_cache",
         "requires_compliance"
     }
+
+    def _match_structured_supersession(
+        self,
+        candidate: ExtractedCandidate,
+        cand_claim: Optional[Dict[str, Any]],
+        cand_replaces_norm: Optional[str],
+        has_replacement_kw: bool,
+        old: Memory,
+        old_claim: Dict[str, Any]
+    ) -> Optional[DiffResult]:
+        """
+        Evaluates whether candidate supersedes an existing memory with a structured claim.
+        Strictly compares subject, predicate, object, and scope.
+        Statement substring searching against old.statement is NOT permitted.
+        """
+        old_obj = old_claim.get("object")
+        old_subj = old_claim.get("subject")
+        old_pred = old_claim.get("predicate")
+
+        # 1. Explicit replacement field
+        if cand_replaces_norm and cand_replaces_norm == old_obj:
+            if not cand_claim or (
+                cand_claim.get("subject") == old_subj and cand_claim.get("predicate") == old_pred
+            ):
+                return DiffResult(
+                    change_type="SUPERSEDED",
+                    candidate_statement=candidate.statement,
+                    existing_memory_id=old.id,
+                    existing_statement=old.statement,
+                    reason=f"Candidate explicitly supersedes object '{old_obj}'",
+                    confidence=0.95,
+                    review_required=False,
+                    evidence={"replaces": cand_replaces_norm, "matched_field": "explicit_replaces"}
+                )
+
+        # 2. Replacement keyword in candidate statement referencing old object
+        if has_replacement_kw and old_obj:
+            cand_stmt_lower = candidate.statement.lower()
+            cand_words = set(re.findall(r"\b\w+\b", cand_stmt_lower))
+            if old_obj in cand_words or old_obj in cand_stmt_lower:
+                if not cand_claim or (
+                    cand_claim.get("subject") == old_subj and cand_claim.get("predicate") == old_pred
+                ):
+                    return DiffResult(
+                        change_type="SUPERSEDED",
+                        candidate_statement=candidate.statement,
+                        existing_memory_id=old.id,
+                        existing_statement=old.statement,
+                        reason=f"Claim replacement indicated for subject '{old_subj}'",
+                        confidence=0.94,
+                        review_required=False,
+                        evidence={"superseded_object": old_obj}
+                    )
+
+        return None
+
+    def _match_legacy_supersession(
+        self,
+        candidate: ExtractedCandidate,
+        cand_replaces: Optional[str],
+        cand_stmt_lower: str,
+        has_replacement_kw: bool,
+        old: Memory
+    ) -> Optional[DiffResult]:
+        """
+        Fallback for legacy memories lacking structured claim.
+        Requires compatible memory type and explicit replacement reference.
+        """
+        if old.memory_type != candidate.memory_type:
+            return None
+
+        old_stmt_lower = old.statement.strip().lower()
+
+        if cand_replaces and (cand_replaces in old_stmt_lower):
+            return DiffResult(
+                change_type="SUPERSEDED",
+                candidate_statement=candidate.statement,
+                existing_memory_id=old.id,
+                existing_statement=old.statement,
+                reason=f"Candidate explicitly supersedes legacy memory target '{cand_replaces}'",
+                confidence=0.93,
+                review_required=False,
+                evidence={"replaces": cand_replaces, "matched_field": "legacy_explicit_replaces"}
+            )
+
+        if has_replacement_kw and (old_stmt_lower in cand_stmt_lower):
+            return DiffResult(
+                change_type="SUPERSEDED",
+                candidate_statement=candidate.statement,
+                existing_memory_id=old.id,
+                existing_statement=old.statement,
+                reason="Replacement keyword detected referencing legacy statement",
+                confidence=0.91,
+                review_required=False,
+                evidence={"indicator": "legacy_replacement_keyword"}
+            )
+
+        return None
+
+    def _evaluate_competing_claim(
+        self,
+        candidate: ExtractedCandidate,
+        cand_claim: Dict[str, Any],
+        old: Memory,
+        old_claim: Dict[str, Any]
+    ) -> Optional[DiffResult]:
+        """
+        Evaluates relationship between candidate and existing memory when both have claims
+        with same subject and predicate but different object.
+        """
+        if (
+            cand_claim.get("subject") != old_claim.get("subject")
+            or cand_claim.get("predicate") != old_claim.get("predicate")
+            or cand_claim.get("object") == old_claim.get("object")
+        ):
+            return None
+
+        predicate = cand_claim.get("predicate")
+        if predicate in self.MULTI_VALUED_PREDICATES:
+            return DiffResult(
+                change_type="COEXISTING",
+                candidate_statement=candidate.statement,
+                existing_memory_id=old.id,
+                existing_statement=old.statement,
+                reason=f"Predicate '{predicate}' naturally supports multiple coexisting values",
+                confidence=candidate.confidence,
+                review_required=False,
+                evidence={"multi_valued_predicate": predicate}
+            )
+
+        cand_scope = cand_claim.get("scope") or {}
+        old_scope = old_claim.get("scope") or {}
+
+        scopes_distinct = False
+        for k in set(cand_scope.keys()).union(set(old_scope.keys())):
+            v1 = cand_scope.get(k)
+            v2 = old_scope.get(k)
+            if v1 and v2 and v1 != v2:
+                scopes_distinct = True
+                break
+
+        if scopes_distinct:
+            is_high_conf = candidate.confidence >= 0.90
+            return DiffResult(
+                change_type="COEXISTING",
+                candidate_statement=candidate.statement,
+                existing_memory_id=old.id,
+                existing_statement=old.statement,
+                reason=(
+                    f"Claims share subject and predicate but serve distinct scopes ({cand_scope} vs {old_scope})"
+                    if is_high_conf else
+                    f"Coexisting claims detected with low scope confidence ({candidate.confidence:.2f})"
+                ),
+                confidence=candidate.confidence,
+                review_required=not is_high_conf,
+                evidence={"scope_a": old_scope, "scope_b": cand_scope}
+            )
+
+        return DiffResult(
+            change_type="CONFLICTING",
+            candidate_statement=candidate.statement,
+            existing_memory_id=old.id,
+            existing_statement=old.statement,
+            reason=f"Direct conflict on {cand_claim.get('subject')}.{cand_claim.get('predicate')}: '{old_claim.get('object')}' vs '{cand_claim.get('object')}'",
+            confidence=0.92,
+            review_required=True,
+            evidence={"claim_a": old_claim, "claim_b": cand_claim}
+        )
 
     def classify_diff(
         self,
@@ -90,8 +259,9 @@ class MemoryDiffEngine:
                         review_required=False
                     )
 
-        # 2. Check for SUPERSEDED (Explicit replacement language or details["replaces"])
-        cand_replaces = (candidate.details or {}).get("replaces")
+        # 2. Check for SUPERSEDED
+        raw_replaces = (candidate.details or {}).get("replaces")
+        cand_replaces_norm = ClaimNormalizer.normalize_token(raw_replaces) if raw_replaces else None
         has_replacement_kw = any(kw in cand_stmt_lower for kw in self.REPLACEMENT_INDICATORS)
 
         for old in scoped_memories:
@@ -100,46 +270,27 @@ class MemoryDiffEngine:
 
             old_claim = ClaimNormalizer.normalize_claim(old.structured_claim) if old.structured_claim else None
 
-            # If explicit replaces target matches
-            if cand_replaces:
-                if (old_claim and cand_replaces == old_claim.get("object")) or (cand_replaces in old.statement.lower()):
-                    return DiffResult(
-                        change_type="SUPERSEDED",
-                        candidate_statement=candidate.statement,
-                        existing_memory_id=old.id,
-                        existing_statement=old.statement,
-                        reason=f"Candidate explicitly supersedes {cand_replaces}",
-                        confidence=0.95,
-                        review_required=False,
-                        evidence={"replaces": cand_replaces, "matched_field": "explicit_replaces"}
-                    )
-
-            if has_replacement_kw:
-                # If old object is in candidate statement and subject/predicate align
-                if old_claim and old_claim.get("object") and old_claim.get("object") in cand_stmt_lower:
-                    if not cand_claim or (cand_claim.get("subject") == old_claim.get("subject") and cand_claim.get("predicate") == old_claim.get("predicate")):
-                        return DiffResult(
-                            change_type="SUPERSEDED",
-                            candidate_statement=candidate.statement,
-                            existing_memory_id=old.id,
-                            existing_statement=old.statement,
-                            reason=f"Claim replacement indicated for subject '{old_claim.get('subject')}'",
-                            confidence=0.94,
-                            review_required=False,
-                            evidence={"superseded_object": old_claim.get("object")}
-                        )
-                # If old statement content is mentioned as replaced
-                elif old.statement.lower() in cand_stmt_lower:
-                    return DiffResult(
-                        change_type="SUPERSEDED",
-                        candidate_statement=candidate.statement,
-                        existing_memory_id=old.id,
-                        existing_statement=old.statement,
-                        reason="Replacement keyword detected referencing previous statement",
-                        confidence=0.93,
-                        review_required=False,
-                        evidence={"indicator": "replacement_keyword"}
-                    )
+            if old_claim:
+                super_res = self._match_structured_supersession(
+                    candidate=candidate,
+                    cand_claim=cand_claim,
+                    cand_replaces_norm=cand_replaces_norm,
+                    has_replacement_kw=has_replacement_kw,
+                    old=old,
+                    old_claim=old_claim
+                )
+                if super_res:
+                    return super_res
+            else:
+                legacy_res = self._match_legacy_supersession(
+                    candidate=candidate,
+                    cand_replaces=raw_replaces.lower() if raw_replaces else None,
+                    cand_stmt_lower=cand_stmt_lower,
+                    has_replacement_kw=has_replacement_kw,
+                    old=old
+                )
+                if legacy_res:
+                    return legacy_res
 
         # 3. Check for SAME SUBJECT + SAME PREDICATE + DIFFERENT OBJECT
         if cand_claim:
@@ -150,73 +301,9 @@ class MemoryDiffEngine:
                 if not old_claim:
                     continue
 
-                if (
-                    cand_claim.get("subject") == old_claim.get("subject")
-                    and cand_claim.get("predicate") == old_claim.get("predicate")
-                    and cand_claim.get("object") != old_claim.get("object")
-                ):
-                    # Check if the predicate naturally supports multiple coexisting values
-                    predicate = cand_claim.get("predicate")
-                    if predicate in self.MULTI_VALUED_PREDICATES:
-                        return DiffResult(
-                            change_type="COEXISTING",
-                            candidate_statement=candidate.statement,
-                            existing_memory_id=old.id,
-                            existing_statement=old.statement,
-                            reason=f"Predicate '{predicate}' naturally supports multiple coexisting values",
-                            confidence=candidate.confidence,
-                            review_required=False,
-                            evidence={"multi_valued_predicate": predicate}
-                        )
-                    cand_scope = cand_claim.get("scope") or {}
-                    old_scope = old_claim.get("scope") or {}
-
-                    # Check scope difference
-                    scopes_distinct = False
-                    # Look for distinct keys or differing non-empty values
-                    for k in set(cand_scope.keys()).union(set(old_scope.keys())):
-                        v1 = cand_scope.get(k)
-                        v2 = old_scope.get(k)
-                        if v1 and v2 and v1 != v2:
-                            scopes_distinct = True
-                            break
-
-                    if scopes_distinct:
-                        # Clear coexistence vs Ambiguous coexistence based on confidence
-                        if candidate.confidence >= 0.90:
-                            return DiffResult(
-                                change_type="COEXISTING",
-                                candidate_statement=candidate.statement,
-                                existing_memory_id=old.id,
-                                existing_statement=old.statement,
-                                reason=f"Claims share subject and predicate but serve distinct scopes ({cand_scope} vs {old_scope})",
-                                confidence=candidate.confidence,
-                                review_required=False,
-                                evidence={"scope_a": old_scope, "scope_b": cand_scope}
-                            )
-                        else:
-                            return DiffResult(
-                                change_type="COEXISTING",
-                                candidate_statement=candidate.statement,
-                                existing_memory_id=old.id,
-                                existing_statement=old.statement,
-                                reason=f"Coexisting claims detected with low scope confidence ({candidate.confidence:.2f})",
-                                confidence=candidate.confidence,
-                                review_required=True,
-                                evidence={"scope_a": old_scope, "scope_b": cand_scope}
-                            )
-
-                    # No distinct scope and different object -> Genuine conflict
-                    return DiffResult(
-                        change_type="CONFLICTING",
-                        candidate_statement=candidate.statement,
-                        existing_memory_id=old.id,
-                        existing_statement=old.statement,
-                        reason=f"Direct conflict on {cand_claim.get('subject')}.{cand_claim.get('predicate')}: '{old_claim.get('object')}' vs '{cand_claim.get('object')}'",
-                        confidence=0.92,
-                        review_required=True,
-                        evidence={"claim_a": old_claim, "claim_b": cand_claim}
-                    )
+                comp_res = self._evaluate_competing_claim(candidate, cand_claim, old, old_claim)
+                if comp_res:
+                    return comp_res
 
         # 4. Default: NEW memory
         return DiffResult(

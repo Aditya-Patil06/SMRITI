@@ -1,7 +1,10 @@
 import re
+import logging
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 class ExtractedCandidate(BaseModel):
     memory_type: str  # decision, task, problem, solution, technology, concept, constraint, status_change, fact
@@ -371,7 +374,11 @@ class MemoryExtractor:
 
                     # Heuristic claim generation if tech is mentioned
                     claim = None
-                    for tech_match in self.TECH_PATTERNS[0].finditer(stmt_clean):
+                    target_stmt = stmt_clean
+                    if "instead of" in stmt_clean.lower():
+                        target_stmt = re.split(r"\binstead of\b", stmt_clean, flags=re.IGNORECASE)[0]
+
+                    for tech_match in self.TECH_PATTERNS[0].finditer(target_stmt):
                         tech = ClaimNormalizer.normalize_token(tech_match.group(1))
                         if tech == "redis":
                             pred = "uses_cache"
@@ -448,10 +455,20 @@ class MemoryExtractor:
 
         # 6. Technologies
         seen_tech = set()
+        # If there's an explicit replacement in the content, determine what was replaced so we don't extract it as an active technology
+        replaced_tokens = set()
+        for rep_kw in ["instead of", "replaces", "replaced by", "supersedes", "deprecated in favor of"]:
+            if rep_kw in content.lower():
+                matches = re.findall(rf"{rep_kw}\s+([A-Za-z0-9_\-]+)", content, re.IGNORECASE)
+                for m in matches:
+                    replaced_tokens.add(ClaimNormalizer.normalize_token(m))
+
         for pat in self.TECH_PATTERNS:
             for match in pat.finditer(content):
                 raw_tech = match.group(1)
                 tech_name = ClaimNormalizer.normalize_token(raw_tech)
+                if tech_name in replaced_tokens:
+                    continue
                 if tech_name not in seen_tech:
                     seen_tech.add(tech_name)
                     if tech_name == "redis":
@@ -520,8 +537,8 @@ class HybridExtractionEngine:
                         if cand.confidence < 0.87 and cand.status == "active":
                             cand.status = "review_required"
                         results.append(cand)
-            except Exception:
+            except Exception as exc:
                 # LLM extraction failure must be non-fatal and fall back to heuristics
-                pass
+                logger.warning("LLM extraction failed, falling back to heuristics: %s", exc)
 
         return results

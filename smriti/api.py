@@ -9,7 +9,7 @@ import json
 from smriti.config import settings
 from smriti.models import (
     init_db, get_db, User, Workspace, ProviderAccount,
-    Conversation, Message, Project, Task, Milestone, Memory, RelationshipEdge, AuditLog
+    Conversation, Message, Project, Task, Milestone, Memory, MemoryVersion, RelationshipEdge, AuditLog
 )
 from smriti.schemas import (
     UserRead, WorkspaceRead, WorkspaceCreate,
@@ -577,6 +577,26 @@ def import_conversations(
                             old_mem = db.query(Memory).filter(Memory.id == diff.existing_memory_id).first()
                             if old_mem:
                                 old_mem.superseded_by_id = mem.id
+                                old_mem.status = "superseded"
+                                old_mem.updated_at = datetime.now(timezone.utc)
+                                old_version = MemoryVersion(
+                                    memory_id=old_mem.id,
+                                    version_number=round(old_mem.version + 1.0, 1),
+                                    statement=old_mem.statement,
+                                    rationale=old_mem.rationale,
+                                    structured_claim=old_mem.structured_claim,
+                                    details=old_mem.details,
+                                    status="superseded",
+                                    change_reason=f"Superseded during conversation import by {mem.id}"
+                                )
+                                old_mem.version = old_version.version_number
+                                db.add(old_version)
+                                db.commit()
+                                vector_store.upsert(
+                                    old_mem.id,
+                                    f"{old_mem.statement} {old_mem.rationale or ''}",
+                                    {"workspace_id": old_mem.workspace_id, "project_id": old_mem.project_id, "status": "superseded"}
+                                )
                                 graph_service.add_edge(
                                     db=db,
                                     source_type="memory",

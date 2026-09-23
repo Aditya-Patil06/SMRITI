@@ -1,11 +1,11 @@
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
-from smriti.models import Memory, MemoryVersion, AuditLog, Project, Task, Message, Conversation, ProviderAccount
+from smriti.models import Memory, MemoryVersion, AuditLog, Project, Task, Message, Conversation, ProviderAccount, RelationshipEdge
 from smriti.schemas import ProvenanceExplanation
 from smriti.graph import graph_service
 from smriti.memory_diff import memory_diff_engine, DiffResult
-from smriti.extraction import ExtractedCandidate
+from smriti.extraction import ExtractedCandidate, ClaimNormalizer
 
 class MemoryManager:
     """Handles memory lifecycle, conflict tracking, diff identification, and provenance explainability."""
@@ -25,6 +25,15 @@ class MemoryManager:
             diffs.append(diff)
         return diffs
 
+    def _are_scopes_distinct(self, scope_a: Dict[str, Any], scope_b: Dict[str, Any]) -> bool:
+        """Determines whether two scopes are explicitly distinct."""
+        for k in set(scope_a.keys()).union(set(scope_b.keys())):
+            v1 = scope_a.get(k)
+            v2 = scope_b.get(k)
+            if v1 and v2 and v1 != v2:
+                return True
+        return False
+
     def get_conflicts(
         self,
         db: Session,
@@ -34,6 +43,7 @@ class MemoryManager:
         """
         Retrieves pending conflict and review items across scoped memories.
         Identifies pairs of conflicting or coexisting items needing review.
+        Respects persisted coexistence edges, multi-valued predicates, and distinct scopes.
         """
         q = db.query(Memory).filter(
             Memory.workspace_id == workspace_id,
@@ -42,6 +52,16 @@ class MemoryManager:
         if project_id:
             q = q.filter(Memory.project_id == project_id)
         memories = q.all()
+
+        # Load persisted coexistence edges across memories in workspace
+        coexisting_edges = db.query(RelationshipEdge).filter(
+            RelationshipEdge.source_type == "memory",
+            RelationshipEdge.target_type == "memory",
+            RelationshipEdge.relation == "COEXISTS_WITH"
+        ).all()
+        confirmed_coexisting_pairs = set()
+        for e in coexisting_edges:
+            confirmed_coexisting_pairs.add(tuple(sorted([e.source_id, e.target_id])))
 
         conflicts = []
         seen_pairs = set()
@@ -52,11 +72,11 @@ class MemoryManager:
             if not m1.structured_claim:
                 continue
 
-            claim1 = m1.structured_claim
+            claim1 = ClaimNormalizer.normalize_claim(m1.structured_claim)
             for m2 in memories[i+1:]:
                 if not m2.structured_claim:
                     continue
-                claim2 = m2.structured_claim
+                claim2 = ClaimNormalizer.normalize_claim(m2.structured_claim)
 
                 # If same subject and predicate but different object
                 if (
@@ -64,9 +84,23 @@ class MemoryManager:
                     and claim1.get("predicate") == claim2.get("predicate")
                     and claim1.get("object") != claim2.get("object")
                 ):
-                    # If both are active and already confirmed (e.g. via keep_both), do not re-flag
-                    # Only flag if at least one is review_required OR scopes overlap without confirmation
+                    predicate = claim1.get("predicate")
+                    # Check if predicate naturally supports multiple coexisting values
+                    if predicate in memory_diff_engine.MULTI_VALUED_PREDICATES:
+                        continue
+
                     pair_key = tuple(sorted([m1.id, m2.id]))
+
+                    # If pair already has a confirmed COEXISTS_WITH relationship edge in DB, skip
+                    if pair_key in confirmed_coexisting_pairs:
+                        continue
+
+                    # If both are active with distinct non-overlapping scopes, they coexist cleanly
+                    scope1 = claim1.get("scope") or {}
+                    scope2 = claim2.get("scope") or {}
+                    if m1.status == "active" and m2.status == "active" and self._are_scopes_distinct(scope1, scope2):
+                        continue
+
                     if pair_key not in seen_pairs:
                         seen_pairs.add(pair_key)
                         paired_memory_ids.add(m1.id)
@@ -130,7 +164,8 @@ class MemoryManager:
         Resolves conflicts transactionally with version history, graph updates, and audit logging.
         Supports:
         - keep_active: Marks target active and last_confirmed_at=now
-        - keep_both: Both memory_id and paired_memory_id are kept active with distinct scopes
+        - keep_both: Both memory_id and paired_memory_id are kept active with distinct scopes,
+                     persisting a COEXISTS_WITH relationship edge in graph and database.
         - supersede: Target is superseded by superseded_by_id with SUPERSEDES edge
         - deprecate: Target is marked deprecated
         - forget: Target is soft-deleted as forgotten
@@ -183,6 +218,34 @@ class MemoryManager:
                     )
                     p_mem.version = p_version.version_number
                     db.add(p_version)
+
+                    # Persist bidirectional COEXISTS_WITH relationship edges
+                    existing_edge = db.query(RelationshipEdge).filter(
+                        RelationshipEdge.source_type == "memory",
+                        RelationshipEdge.target_type == "memory",
+                        RelationshipEdge.relation == "COEXISTS_WITH",
+                        ((RelationshipEdge.source_id == mem.id) & (RelationshipEdge.target_id == p_mem.id)) |
+                        ((RelationshipEdge.source_id == p_mem.id) & (RelationshipEdge.target_id == mem.id))
+                    ).first()
+                    if not existing_edge:
+                        graph_service.add_edge(
+                            db=db,
+                            source_type="memory",
+                            source_id=mem.id,
+                            relation="COEXISTS_WITH",
+                            target_type="memory",
+                            target_id=p_mem.id,
+                            properties={"reason": reason or "Confirmed coexistence"}
+                        )
+                        graph_service.add_edge(
+                            db=db,
+                            source_type="memory",
+                            source_id=p_mem.id,
+                            relation="COEXISTS_WITH",
+                            target_type="memory",
+                            target_id=mem.id,
+                            properties={"reason": reason or "Confirmed coexistence"}
+                        )
 
         elif resolution_action == "supersede":
             mem.status = "superseded"

@@ -123,3 +123,24 @@ def test_redis_maps_to_uses_cache():
     redis_cand = next((c for c in cands if c.structured_claim and c.structured_claim.get("object") == "redis"), None)
     assert redis_cand is not None
     assert redis_cand.structured_claim["predicate"] == "uses_cache"
+
+def test_hybrid_engine_llm_failure_logs_warning_and_falls_back(caplog):
+    import logging
+
+    class FailingLLMExtractor(MockLLMExtractor):
+        def extract(self, role: str, content: str, context=None):
+            raise RuntimeError("Simulated upstream LLM network failure")
+
+    heuristic = MemoryExtractor()
+    failing_llm = FailingLLMExtractor()
+    hybrid = HybridExtractionEngine(heuristic_extractor=heuristic, llm_extractor=failing_llm)
+
+    with caplog.at_level(logging.WARNING):
+        candidates = hybrid.extract("assistant", "We decided to use PostgreSQL for data storage.", use_llm=True)
+
+    # Must log warning with exception details
+    assert any("LLM extraction failed" in record.message for record in caplog.records)
+    # Must safely fall back to heuristic extraction without failing
+    assert len(candidates) >= 1
+    assert candidates[0].memory_type == "decision"
+

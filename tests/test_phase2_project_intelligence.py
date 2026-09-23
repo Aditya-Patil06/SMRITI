@@ -174,3 +174,50 @@ def test_synthesis_ignores_superseded_and_forgotten(db_session):
     assert "postgresql" in res["tech_stack"]
     assert "mongodb" not in res["tech_stack"]
     assert "sqlite" not in res["tech_stack"]
+
+def test_synthesis_rebuilds_and_removes_stale_tech_from_project_model(db_session):
+    service = ProjectIntelligenceService()
+
+    # Project starts with old tech in tech_stack
+    proj = Project(
+        id="p-stale",
+        workspace_id="ws-1",
+        name="Stale Project",
+        tech_stack=["mongodb", "flask"],
+        status="active"
+    )
+    db_session.add(proj)
+    db_session.commit()
+
+    # Only new active memories exist: PostgreSQL and FastAPI
+    m1 = Memory(
+        id="m-fresh-1",
+        workspace_id="ws-1",
+        project_id="p-stale",
+        memory_type="technology",
+        statement="Uses technology: PostgreSQL",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "postgresql"},
+        status="active"
+    )
+    m2 = Memory(
+        id="m-fresh-2",
+        workspace_id="ws-1",
+        project_id="p-stale",
+        memory_type="technology",
+        statement="Uses technology: FastAPI",
+        structured_claim={"subject": "project", "predicate": "uses_backend_framework", "object": "fastapi"},
+        status="active"
+    )
+    db_session.add_all([m1, m2])
+    db_session.commit()
+
+    res = service.synthesize_project_state(db_session, "p-stale")
+    db_session.refresh(proj)
+
+    # Stale technologies (mongodb, flask) must NOT be retained
+    assert "mongodb" not in proj.tech_stack
+    assert "flask" not in proj.tech_stack
+    assert "postgresql" in proj.tech_stack
+    assert "fastapi" in proj.tech_stack
+    assert proj.tech_stack == ["fastapi", "postgresql"]
+

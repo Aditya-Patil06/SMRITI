@@ -143,7 +143,7 @@ class MemoryBase(BaseModel):
     memory_type: str
     statement: str
     rationale: Optional[str] = None
-    structured_claim: Optional[Union[StructuredClaim, Dict[str, Any]]] = None
+    structured_claim: Optional[StructuredClaim] = None
     details: Optional[Dict[str, Any]] = None
     status: str = "active"
     confidence: float = 1.0
@@ -158,7 +158,7 @@ class MemoryCreate(MemoryBase):
 class MemoryUpdate(BaseModel):
     statement: Optional[str] = None
     rationale: Optional[str] = None
-    structured_claim: Optional[Union[StructuredClaim, Dict[str, Any]]] = None
+    structured_claim: Optional[StructuredClaim] = None
     status: Optional[str] = None
     confidence: Optional[float] = None
     change_reason: Optional[str] = None

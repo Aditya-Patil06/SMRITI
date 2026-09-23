@@ -483,3 +483,87 @@ def test_phase2_canonical_export_import_roundtrip(client, test_db_session):
     assert len(bundle["milestones"]) >= 1
     assert any(m.get("structured_claim") is not None for m in bundle["memories"])
 
+def test_import_conversations_supersession_syncs_vector_store(client, test_db_session):
+    p_res = client.post("/api/v1/projects", json={"workspace_id": "ws-1", "name": "Import Supersede Project"})
+    p_id = p_res.json()["id"]
+
+    # Initial conversation establishing PostgreSQL
+    payload1 = [{
+        "id": "conv-super-1",
+        "title": "Database setup",
+        "create_time": 1710000000,
+        "mapping": {
+            "n1": {
+                "message": {
+                    "id": "msg-1",
+                    "author": {"role": "user"},
+                    "content": {"parts": ["We decided to implement PostgreSQL for data persistence."]},
+                    "create_time": 1710000001
+                }
+            }
+        }
+    }]
+    res1 = client.post(f"/api/v1/imports/conversations?provider=chatgpt&workspace_id=ws-1&project_id={p_id}", json=payload1)
+    assert res1.status_code == 200
+
+    # Retrieve created memory
+    mems = client.get(f"/api/v1/memories?workspace_id=ws-1&project_id={p_id}").json()
+    assert len(mems) >= 1
+    decision_mem = next(m for m in mems if "PostgreSQL" in m["statement"] and m["memory_type"] == "decision")
+    m1_id = decision_mem["id"]
+    assert vector_store.metadata[m1_id]["status"] == "active"
+
+    # Second conversation explicitly superseding PostgreSQL with SQLite
+    payload2 = [{
+        "id": "conv-super-2",
+        "title": "Database migration",
+        "create_time": 1710000010,
+        "mapping": {
+            "n2": {
+                "message": {
+                    "id": "msg-2",
+                    "author": {"role": "user"},
+                    "content": {"parts": ["We switched to SQLite instead of PostgreSQL for testing."]},
+                    "create_time": 1710000011
+                }
+            }
+        }
+    }]
+    res2 = client.post(f"/api/v1/imports/conversations?provider=chatgpt&workspace_id=ws-1&project_id={p_id}", json=payload2)
+    assert res2.status_code == 200
+
+    # Old memory vector store metadata MUST now be superseded
+    assert vector_store.metadata[m1_id]["status"] == "superseded"
+
+    # Verify search with include_superseded=False filters it out
+    search_res = client.get(f"/api/v1/search?query=PostgreSQL&workspace_id=ws-1&project_id={p_id}&include_superseded=false").json()
+    assert not any(item["id"] == m1_id for item in search_res)
+
+def test_structured_claim_schema_validation(client, test_db_session):
+    # Valid structured claim
+    valid_res = client.post("/api/v1/memories", json={
+        "workspace_id": "ws-1",
+        "memory_type": "decision",
+        "statement": "Valid claim test",
+        "structured_claim": {
+            "subject": "backend",
+            "predicate": "uses_database",
+            "object": "postgresql"
+        }
+    })
+    assert valid_res.status_code == 201
+    assert valid_res.json()["structured_claim"]["subject"] == "backend"
+
+    # Invalid structured claim (missing required fields e.g. predicate and object)
+    invalid_res = client.post("/api/v1/memories", json={
+        "workspace_id": "ws-1",
+        "memory_type": "decision",
+        "statement": "Invalid claim test",
+        "structured_claim": {
+            "subject": "backend"
+            # predicate and object missing
+        }
+    })
+    assert invalid_res.status_code == 422
+
+

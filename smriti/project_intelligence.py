@@ -34,13 +34,15 @@ class ProjectIntelligenceService:
 
         tasks = db.query(Task).filter(Task.project_id == project_id).all()
 
-        derived_tech_stack = set(proj.tech_stack or [])
-        derived_constraints = set(proj.constraints or [])
+        derived_tech_stack = set()
+        derived_constraints = set()
         architecture_points = []
-        derived_goal = proj.goal
+        derived_goal = None
 
         for m in memories:
-            # Check structured claim
+            handled_by_claim = False
+
+            # Check structured claim first
             if m.structured_claim:
                 claim = m.structured_claim
                 pred = claim.get("predicate", "")
@@ -48,20 +50,24 @@ class ProjectIntelligenceService:
                 if pred in ["uses_database", "uses_backend_framework", "uses_frontend_framework", "uses_technology", "uses_orm", "uses_language", "uses_cache"]:
                     if obj:
                         derived_tech_stack.add(obj)
+                        handled_by_claim = True
                 if pred in ["constrained_by", "requires_compliance"]:
                     if obj:
                         derived_constraints.add(obj)
+                        handled_by_claim = True
 
-            # Check details or statements
-            if m.memory_type == "technology":
-                tech_val = (m.details or {}).get("technology")
-                if tech_val:
-                    derived_tech_stack.add(tech_val.lower())
-                else:
-                    derived_tech_stack.add(m.statement.replace("Uses technology: ", "").strip().lower())
-            elif m.memory_type == "constraint":
-                derived_constraints.add(m.statement.strip())
-            elif m.memory_type == "decision":
+            # If not already handled by structured claim, check legacy types
+            if not handled_by_claim:
+                if m.memory_type == "technology":
+                    tech_val = (m.details or {}).get("technology")
+                    if tech_val:
+                        derived_tech_stack.add(tech_val.lower())
+                    else:
+                        derived_tech_stack.add(m.statement.replace("Uses technology: ", "").strip().lower())
+                elif m.memory_type == "constraint":
+                    derived_constraints.add(m.statement.strip())
+
+            if m.memory_type == "decision":
                 architecture_points.append(m.statement.strip())
                 if not derived_goal and ("build" in m.statement.lower() or "create" in m.statement.lower() or "goal" in m.statement.lower()):
                     derived_goal = m.statement.strip()
@@ -75,17 +81,15 @@ class ProjectIntelligenceService:
             proj.goal = derived_goal
             changes["goal"] = derived_goal
 
-        if derived_tech_stack:
-            sorted_tech = sorted(list(derived_tech_stack))
-            if sorted_tech != proj.tech_stack:
-                proj.tech_stack = sorted_tech
-                changes["tech_stack"] = sorted_tech
+        sorted_tech = sorted(list(derived_tech_stack))
+        if sorted_tech != (proj.tech_stack or []):
+            proj.tech_stack = sorted_tech
+            changes["tech_stack"] = sorted_tech
 
-        if derived_constraints:
-            sorted_constraints = sorted(list(derived_constraints))
-            if sorted_constraints != proj.constraints:
-                proj.constraints = sorted_constraints
-                changes["constraints"] = sorted_constraints
+        sorted_constraints = sorted(list(derived_constraints))
+        if sorted_constraints != (proj.constraints or []):
+            proj.constraints = sorted_constraints
+            changes["constraints"] = sorted_constraints
 
         if architecture_points and not proj.architecture_overview:
             overview = "; ".join(architecture_points[:5])
