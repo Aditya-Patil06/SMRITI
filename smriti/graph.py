@@ -24,7 +24,8 @@ class KnowledgeGraphService:
                 node_type="project",
                 label=p.name,
                 status=p.status,
-                id=p.id
+                id=p.id,
+                workspace_id=p.workspace_id
             )
 
         # 2. Memories
@@ -39,7 +40,9 @@ class KnowledgeGraphService:
                 full_statement=m.statement,
                 memory_type=m.memory_type,
                 status=m.status,
-                id=m.id
+                id=m.id,
+                workspace_id=m.workspace_id,
+                project_id=m.project_id
             )
             if m.project_id:
                 self.graph.add_edge(
@@ -52,12 +55,15 @@ class KnowledgeGraphService:
         # 3. Tasks
         task_q = db.query(Task)
         for t in task_q.all():
+            task_ws_id = t.project.workspace_id if t.project else None
             self.graph.add_node(
                 f"task:{t.id}",
                 node_type="task",
                 label=t.title,
                 status=t.status,
-                id=t.id
+                id=t.id,
+                project_id=t.project_id,
+                workspace_id=task_ws_id
             )
             self.graph.add_edge(
                 f"project:{t.project_id}",
@@ -129,8 +135,14 @@ class KnowledgeGraphService:
 
         return GraphData(nodes=nodes, edges=edges)
 
-    def find_connected_memories(self, node_id: str, max_hops: int = 2) -> List[str]:
-        """Find memory IDs connected to a given node."""
+    def find_connected_memories(
+        self,
+        node_id: str,
+        max_hops: int = 2,
+        workspace_id: Optional[str] = None,
+        project_id: Optional[str] = None
+    ) -> List[str]:
+        """Find memory IDs connected to a given node within workspace/project scope boundaries."""
         if not self.graph.has_node(node_id):
             return []
         
@@ -145,8 +157,22 @@ class KnowledgeGraphService:
                 for nbr in neighbors:
                     if nbr not in visited:
                         visited.add(nbr)
+                        nbr_data = self.graph.nodes[nbr]
+                        # Scope validation during traversal
+                        if workspace_id and nbr_data.get("node_type") == "task":
+                            if nbr_data.get("workspace_id") != workspace_id:
+                                continue
+                        elif workspace_id and nbr_data.get("workspace_id") and nbr_data.get("workspace_id") != workspace_id:
+                            continue
+                        if project_id and nbr_data.get("project_id") and nbr_data.get("project_id") != project_id:
+                            continue
                         next_frontier.add(nbr)
                         if nbr.startswith("memory:"):
+                            # If it's a memory, ensure it strictly matches requested scope
+                            if workspace_id and nbr_data.get("workspace_id") != workspace_id:
+                                continue
+                            if project_id and nbr_data.get("project_id") != project_id:
+                                continue
                             memory_ids.append(nbr.replace("memory:", ""))
             frontier = next_frontier
 

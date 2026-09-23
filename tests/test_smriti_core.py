@@ -207,3 +207,106 @@ def test_provider_capability_discovery():
     chatgpt_caps = next(c for c in caps if c.provider == "chatgpt")
     assert chatgpt_caps.capabilities["READ_CONTEXT"] is True
     assert chatgpt_caps.capabilities["REAL_TIME_EVENTS"] is False  # Unsupported without official webhook/MCP
+
+def test_graph_expansion_scope_isolation(db_session):
+    # Setup two workspaces in DB with projects, tasks, and memories
+    p1 = Project(id="p1", workspace_id="ws-alpha", name="Project Alpha")
+    p2 = Project(id="p2", workspace_id="ws-beta", name="Project Beta")
+    db_session.add_all([p1, p2])
+
+    t1 = Task(id="t1", project_id="p1", title="Task in WS Alpha")
+    t2 = Task(id="t2", project_id="p2", title="Task in WS Beta")
+    db_session.add_all([t1, t2])
+
+    m1 = Memory(id="m1", workspace_id="ws-alpha", project_id="p1", memory_type="fact", statement="Alpha fact", status="active")
+    m2 = Memory(id="m2", workspace_id="ws-alpha", project_id="p1", memory_type="fact", statement="Alpha fact 2", status="active")
+    m3 = Memory(id="m3", workspace_id="ws-beta", project_id="p2", memory_type="fact", statement="Beta fact", status="active")
+    db_session.add_all([m1, m2, m3])
+    db_session.commit()
+
+    graph = KnowledgeGraphService()
+    graph.sync_from_db(db_session)
+
+    # 1. Task nodes must contain workspace_id after sync_from_db()
+    assert graph.graph.nodes["task:t1"].get("workspace_id") == "ws-alpha"
+    assert graph.graph.nodes["task:t2"].get("workspace_id") == "ws-beta"
+
+    # Create an isolated memory connected ONLY via task:t1
+    # m1 -> task:t1 -> m_task_only
+    graph.graph.add_node("memory:m_iso", node_type="memory", workspace_id="ws-alpha", project_id="p1")
+    graph.graph.add_edge("memory:m1", "task:t1", relation="RELATES_TO")
+    graph.graph.add_edge("task:t1", "memory:m_iso", relation="RELATES_TO")
+
+    # Path 2: m1 -> task:t2 (diff ws) -> m3 (diff ws)
+    graph.graph.add_edge("memory:m1", "task:t2", relation="RELATES_TO")
+    graph.graph.add_edge("task:t2", "memory:m3", relation="RELATES_TO")
+
+    # 2. A task belonging to requested workspace can participate in traversal
+    # Traversal from m1 scoped to ws-alpha should find m_iso via task:t1
+    connected_alpha = graph.find_connected_memories("memory:m1", max_hops=2, workspace_id="ws-alpha")
+    assert "m_iso" in connected_alpha
+
+    # 3. A task belonging to another workspace cannot participate in workspace-scoped traversal
+    assert "m3" not in connected_alpha
+
+    # 4. A task with missing workspace_id cannot bypass workspace-scoped traversal
+    # Manually delete or set workspace_id to None on task:t1
+    graph.graph.nodes["task:t1"]["workspace_id"] = None
+    connected_no_ws = graph.find_connected_memories("memory:m1", max_hops=2, workspace_id="ws-alpha")
+    assert "m_iso" not in connected_no_ws
+
+    # 5. Without workspace restriction, both paths can participate
+    connected_unscoped = graph.find_connected_memories("memory:m1", max_hops=2)
+    assert "m_iso" in connected_unscoped
+    assert "m3" in connected_unscoped
+
+    # Scoped traversal to project p1 should NOT return m3
+    graph.graph.nodes["task:t1"]["workspace_id"] = "ws-alpha"
+    connected_proj = graph.find_connected_memories("memory:m1", max_hops=2, project_id="p1")
+    assert "m_iso" in connected_proj
+    assert "m3" not in connected_proj
+
+def test_vector_store_atomic_save_and_staged_rebuild_safety(tmp_path, db_session):
+    storage_file = str(tmp_path / "atomic_vectors.json")
+    emb = EmbeddingService(dimension=64)
+    vstore = VectorStore(emb, storage_path=storage_file)
+
+    # Initial upsert
+    vstore.upsert("doc-stable", "Stable content", {"workspace_id": "ws-1"})
+    assert "doc-stable" in vstore.vectors
+
+    # Ensure staged rebuild keeps old state intact if an error occurs mid-rebuild
+    m = Memory(id="mem-valid", workspace_id="ws-1", memory_type="fact", statement="Valid memory", status="active")
+    db_session.add(m)
+    db_session.commit()
+
+    # Rebuild succeeds
+    count = vstore.rebuild_from_db(db_session)
+    assert count >= 1
+    assert "mem-valid" in vstore.vectors
+
+def test_canonical_import_legacy_bundle_default_user(db_session):
+    engine = CanonicalExportEngine()
+    # Bundle missing user_id in workspace and missing users list
+    legacy_bundle = {
+        "manifest": {
+            "version": "1.0.0",
+            "entity_counts": {}
+        },
+        "workspaces": [
+            {
+                "id": "legacy-ws-1",
+                "name": "Legacy Workspace",
+                "is_default": False
+            }
+        ]
+    }
+    counts = engine.import_all(db_session, legacy_bundle)
+    assert counts["workspaces"] == 1
+    # Verify default user was created and assigned
+    ws = db_session.query(Workspace).filter(Workspace.id == "legacy-ws-1").first()
+    assert ws is not None
+    assert ws.user_id == CanonicalExportEngine.DEFAULT_USER_ID
+    default_user = db_session.query(User).filter(User.id == CanonicalExportEngine.DEFAULT_USER_ID).first()
+    assert default_user is not None
+

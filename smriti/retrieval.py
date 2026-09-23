@@ -70,6 +70,7 @@ class HybridRetrievalEngine:
             query=query_clean,
             top_k=limit * 2,
             filter_fn=lambda m: (not project_id or m.get("project_id") == project_id) and
+                                (not workspace_id or m.get("workspace_id") == workspace_id) and
                                 (include_superseded or m.get("status") not in ["superseded", "forgotten"])
         )
 
@@ -79,7 +80,12 @@ class HybridRetrievalEngine:
             if key in results_map:
                 results_map[key].score += scaled_sim
             else:
-                mem = db.query(Memory).filter(Memory.id == doc_id).first()
+                mem_q = db.query(Memory).filter(Memory.id == doc_id)
+                if workspace_id:
+                    mem_q = mem_q.filter(Memory.workspace_id == workspace_id)
+                if project_id:
+                    mem_q = mem_q.filter(Memory.project_id == project_id)
+                mem = mem_q.first()
                 if mem and (include_superseded or mem.status not in ["superseded", "forgotten"]):
                     results_map[key] = SearchResultItem(
                         id=mem.id,
@@ -91,6 +97,7 @@ class HybridRetrievalEngine:
                             "memory_type": mem.memory_type,
                             "status": mem.status,
                             "confidence": mem.confidence,
+                            "workspace_id": mem.workspace_id,
                             "project_id": mem.project_id
                         }
                     )
@@ -100,13 +107,23 @@ class HybridRetrievalEngine:
         if results_map:
             top_ids = sorted(results_map.keys(), key=lambda k: results_map[k].score, reverse=True)[:3]
             for top_key in top_ids:
-                connected_ids = graph_service.find_connected_memories(top_key, max_hops=1)
+                connected_ids = graph_service.find_connected_memories(
+                    top_key,
+                    max_hops=1,
+                    workspace_id=workspace_id,
+                    project_id=project_id
+                )
                 for conn_id in connected_ids:
                     c_key = f"memory:{conn_id}"
                     if c_key in results_map:
                         results_map[c_key].score += 0.15
                     else:
-                        conn_mem = db.query(Memory).filter(Memory.id == conn_id).first()
+                        conn_mem_q = db.query(Memory).filter(Memory.id == conn_id)
+                        if workspace_id:
+                            conn_mem_q = conn_mem_q.filter(Memory.workspace_id == workspace_id)
+                        if project_id:
+                            conn_mem_q = conn_mem_q.filter(Memory.project_id == project_id)
+                        conn_mem = conn_mem_q.first()
                         if conn_mem and (include_superseded or conn_mem.status not in ["superseded", "forgotten"]):
                             results_map[c_key] = SearchResultItem(
                                 id=conn_mem.id,
@@ -118,6 +135,7 @@ class HybridRetrievalEngine:
                                     "memory_type": conn_mem.memory_type,
                                     "status": conn_mem.status,
                                     "confidence": conn_mem.confidence,
+                                    "workspace_id": conn_mem.workspace_id,
                                     "project_id": conn_mem.project_id
                                 }
                             )

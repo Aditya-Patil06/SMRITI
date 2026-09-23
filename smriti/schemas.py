@@ -18,7 +18,7 @@ class WorkspaceBase(BaseModel):
     is_default: bool = False
 
 class WorkspaceCreate(WorkspaceBase):
-    pass
+    user_id: Optional[str] = None
 
 class WorkspaceRead(WorkspaceBase):
     id: str
@@ -103,6 +103,7 @@ class ProjectBase(BaseModel):
 
 class ProjectCreate(ProjectBase):
     workspace_id: Optional[str] = None
+    user_id: Optional[str] = None
 
 class ProjectRead(ProjectBase):
     id: str
@@ -157,6 +158,13 @@ class ProvenanceExplanation(BaseModel):
     confidence: float
     extraction_method: str
     created_at: datetime
+    workspace_id: Optional[str] = None
+    project_id: Optional[str] = None
+    is_manual: bool = False
+    source_unavailable: bool = False
+    superseded_by_id: Optional[str] = None
+    provider: Optional[str] = None
+    provider_account: Optional[Dict[str, Any]] = None
     source_conversation: Optional[Dict[str, Any]] = None
     source_message: Optional[Dict[str, Any]] = None
     relevant_source_content: Optional[str] = None
