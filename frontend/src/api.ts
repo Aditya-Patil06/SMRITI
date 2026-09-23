@@ -15,6 +15,17 @@ export interface DashboardStats {
   }>;
 }
 
+export interface Milestone {
+  id: string;
+  project_id: string;
+  title: string;
+  description?: string;
+  milestone_type: string;
+  evidence_memory_id?: string;
+  reached_at?: string;
+  created_at: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -27,6 +38,33 @@ export interface Project {
   created_at: string;
   updated_at: string;
   tasks: Task[];
+  milestones?: Milestone[];
+}
+
+export interface ConflictItem {
+  id: string;
+  type: string;
+  subject?: string;
+  predicate?: string;
+  memory_a: {
+    id: string;
+    statement: string;
+    object?: string;
+    scope?: Record<string, any>;
+    status: string;
+    confidence: number;
+    created_at?: string;
+  };
+  memory_b?: {
+    id: string;
+    statement: string;
+    object?: string;
+    scope?: Record<string, any>;
+    status: string;
+    confidence: number;
+    created_at?: string;
+  } | null;
+  reason: string;
 }
 
 export interface Task {
@@ -212,6 +250,38 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    return res.json();
+  },
+
+  async getConflicts(workspaceId?: string, projectId?: string): Promise<ConflictItem[]> {
+    let url = `${API_BASE}/conflicts`;
+    const params = new URLSearchParams();
+    if (workspaceId) params.append("workspace_id", workspaceId);
+    if (projectId) params.append("project_id", projectId);
+    if (params.toString()) url += `?${params.toString()}`;
+    const res = await fetch(url);
+    return res.json();
+  },
+
+  async resolveConflictFlow(
+    memoryId: string,
+    action: string,
+    pairedMemoryId?: string,
+    supersededById?: string,
+    reason?: string
+  ): Promise<any> {
+    const params = new URLSearchParams();
+    params.append("memory_id", memoryId);
+    params.append("resolution_action", action);
+    if (pairedMemoryId) params.append("paired_memory_id", pairedMemoryId);
+    if (supersededById) params.append("superseded_by_id", supersededById);
+    if (reason) params.append("reason", reason);
+    const res = await fetch(`${API_BASE}/conflicts/resolve?${params.toString()}`, { method: "POST" });
+    return res.json();
+  },
+
+  async synthesizeProject(projectId: string): Promise<any> {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/synthesize`, { method: "POST" });
     return res.json();
   }
 };

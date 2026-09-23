@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { 
   Brain, LayoutDashboard, FolderGit2, History, Network, ArrowLeftRight, 
-  Download, Copy, Check, Sparkles, Database
+  Download, Copy, Check, Sparkles, Database, AlertTriangle, RefreshCw
 } from 'lucide-react';
 import { 
   api, 
@@ -12,14 +12,16 @@ import {
   type ProvenanceExplanation, 
   type ContextPackage, 
   type GraphData, 
-  type ProviderCapability 
+  type ProviderCapability,
+  type ConflictItem
 } from './api';
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'projects' | 'memories' | 'conversations' | 'graph' | 'context' | 'imports' | 'providers'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'projects' | 'memories' | 'conflicts' | 'conversations' | 'graph' | 'context' | 'imports' | 'providers'>('dashboard');
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [memories, setMemories] = useState<Memory[]>([]);
+  const [conflicts, setConflicts] = useState<ConflictItem[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [capabilities, setCapabilities] = useState<ProviderCapability[]>([]);
@@ -39,20 +41,42 @@ export function App() {
 
   async function loadData() {
     try {
-      const [s, p, m, c, caps] = await Promise.all([
+      const [s, p, m, confs, c, caps] = await Promise.all([
         api.getDashboard().catch(() => null),
         api.getProjects().catch(() => []),
         api.getMemories().catch(() => []),
+        api.getConflicts().catch(() => []),
         api.getConversations().catch(() => []),
         api.getCapabilities().catch(() => [])
       ]);
       setStats(s);
       setProjects(p);
       setMemories(m);
+      setConflicts(confs);
       setConversations(c);
       setCapabilities(caps);
     } catch (e) {
       console.error(e);
+    }
+  }
+
+  async function handleResolveConflictFlow(memId: string, action: string, pairedId?: string, supersededById?: string) {
+    try {
+      await api.resolveConflictFlow(memId, action, pairedId, supersededById, `Resolved via Conflict Review (${action})`);
+      alert(`Conflict resolved: ${action}`);
+      loadData();
+    } catch (e) {
+      alert("Error resolving conflict");
+    }
+  }
+
+  async function handleSynthesizeProject(projectId: string) {
+    try {
+      await api.synthesizeProject(projectId);
+      alert("Project state synthesized & milestones detected!");
+      loadData();
+    } catch (e) {
+      alert("Failed to synthesize project state");
     }
   }
 
@@ -130,6 +154,7 @@ export function App() {
             { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
             { id: 'projects', label: 'Projects & State', icon: FolderGit2 },
             { id: 'memories', label: 'Memory Bank', icon: Database },
+            { id: 'conflicts', label: `Conflicts (${conflicts.length})`, icon: AlertTriangle },
             { id: 'context', label: 'Context Engine', icon: Sparkles },
             { id: 'conversations', label: 'Conversations', icon: History },
             { id: 'graph', label: 'Knowledge Graph', icon: Network },
@@ -188,6 +213,7 @@ export function App() {
               {activeTab === 'dashboard' && 'Control Center Overview'}
               {activeTab === 'projects' && 'Project Memory & State'}
               {activeTab === 'memories' && 'Persistent Canonical Memories'}
+              {activeTab === 'conflicts' && 'Conflict Review & Memory Synthesis'}
               {activeTab === 'context' && 'Portable Context Generator'}
               {activeTab === 'conversations' && 'Normalized Conversation Archives'}
               {activeTab === 'graph' && 'Relational Knowledge Graph'}
@@ -329,6 +355,137 @@ export function App() {
           </div>
         )}
 
+        {/* Conflicts & Resolution Tab */}
+        {activeTab === 'conflicts' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '10px', padding: '20px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '16px', color: '#f8fafc' }}>Interactive Conflict & Coexistence Resolution</h3>
+                  <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: '#94a3b8' }}>
+                    Compare conflicting statements or ambiguous claims side-by-side. Choose to keep either claim, confirm coexistence (both), or supersede.
+                  </p>
+                </div>
+                <button
+                  onClick={loadData}
+                  style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 12px', background: '#1e293b', border: '1px solid #334155', borderRadius: '6px', color: '#e2e8f0', cursor: 'pointer', fontSize: '12px' }}
+                >
+                  <RefreshCw size={14} /> Refresh
+                </button>
+              </div>
+            </div>
+
+            {conflicts.length === 0 ? (
+              <div style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '10px', padding: '32px', textAlign: 'center', color: '#10b981' }}>
+                <Check size={32} style={{ margin: '0 auto 12px auto' }} />
+                <div style={{ fontSize: '16px', fontWeight: '600' }}>No Unresolved Conflicts</div>
+                <div style={{ fontSize: '13px', color: '#64748b', marginTop: '4px' }}>All memory claims are consistent, verified, or cleanly coexisting.</div>
+              </div>
+            ) : (
+              conflicts.map((conf) => (
+                <div key={conf.id} style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: '10px', padding: '20px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                    <AlertTriangle size={18} color="#f59e0b" />
+                    <span style={{ fontSize: '14px', fontWeight: '600', color: '#f59e0b' }}>
+                      {conf.type === 'CLAIM_CONFLICT' ? `Competing Claim: ${conf.subject} → ${conf.predicate}` : 'Verification Required'}
+                    </span>
+                    <span style={{ fontSize: '12px', color: '#64748b' }}>({conf.reason})</span>
+                  </div>
+
+                  {conf.memory_b ? (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '16px' }}>
+                      {/* Option A */}
+                      <div style={{ background: '#020617', border: '1px solid #1e293b', borderRadius: '8px', padding: '16px' }}>
+                        <div style={{ fontSize: '12px', color: '#38bdf8', fontWeight: '600', marginBottom: '6px' }}>CLAIM A</div>
+                        <div style={{ fontSize: '14px', color: '#f1f5f9', marginBottom: '8px' }}>{conf.memory_a.statement}</div>
+                        {conf.memory_a.scope && (
+                          <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '8px' }}>
+                            <strong>Scope:</strong> {JSON.stringify(conf.memory_a.scope)}
+                          </div>
+                        )}
+                        <div style={{ fontSize: '11px', color: '#64748b' }}>
+                          Confidence: {(conf.memory_a.confidence * 100).toFixed(0)}% | Status: {conf.memory_a.status}
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+                          <button
+                            onClick={() => handleResolveConflictFlow(conf.memory_a.id, 'keep_active', conf.memory_b?.id)}
+                            style={{ flex: 1, padding: '6px', background: '#0284c7', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '500' }}
+                          >
+                            Keep A Only
+                          </button>
+                          <button
+                            onClick={() => handleResolveConflictFlow(conf.memory_a.id, 'supersede', undefined, conf.memory_b?.id)}
+                            style={{ padding: '6px 12px', background: '#334155', color: '#e2e8f0', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px' }}
+                          >
+                            Superseded by B
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Option B */}
+                      <div style={{ background: '#020617', border: '1px solid #1e293b', borderRadius: '8px', padding: '16px' }}>
+                        <div style={{ fontSize: '12px', color: '#10b981', fontWeight: '600', marginBottom: '6px' }}>CLAIM B</div>
+                        <div style={{ fontSize: '14px', color: '#f1f5f9', marginBottom: '8px' }}>{conf.memory_b.statement}</div>
+                        {conf.memory_b.scope && (
+                          <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '8px' }}>
+                            <strong>Scope:</strong> {JSON.stringify(conf.memory_b.scope)}
+                          </div>
+                        )}
+                        <div style={{ fontSize: '11px', color: '#64748b' }}>
+                          Confidence: {(conf.memory_b.confidence * 100).toFixed(0)}% | Status: {conf.memory_b.status}
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+                          <button
+                            onClick={() => handleResolveConflictFlow(conf.memory_b!.id, 'keep_active', conf.memory_a.id)}
+                            style={{ flex: 1, padding: '6px', background: '#10b981', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '500' }}
+                          >
+                            Keep B Only
+                          </button>
+                          <button
+                            onClick={() => handleResolveConflictFlow(conf.memory_b!.id, 'supersede', undefined, conf.memory_a.id)}
+                            style={{ padding: '6px 12px', background: '#334155', color: '#e2e8f0', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px' }}
+                          >
+                            Superseded by A
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ background: '#020617', border: '1px solid #1e293b', borderRadius: '8px', padding: '16px', marginBottom: '16px' }}>
+                      <div style={{ fontSize: '14px', color: '#f1f5f9', marginBottom: '8px' }}>{conf.memory_a.statement}</div>
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <button
+                          onClick={() => handleResolveConflictFlow(conf.memory_a.id, 'keep_active')}
+                          style={{ padding: '6px 14px', background: '#10b981', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px' }}
+                        >
+                          Confirm Active
+                        </button>
+                        <button
+                          onClick={() => handleResolveConflictFlow(conf.memory_a.id, 'deprecate')}
+                          style={{ padding: '6px 14px', background: '#ef4444', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px' }}
+                        >
+                          Deprecate
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {conf.memory_b && (
+                    <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end', borderTop: '1px solid #1e293b', paddingTop: '12px' }}>
+                      <button
+                        onClick={() => handleResolveConflictFlow(conf.memory_a.id, 'keep_both', conf.memory_b?.id)}
+                        style={{ padding: '8px 16px', background: '#0284c7', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: '600' }}
+                      >
+                        Keep Both (Coexisting in Different Scopes)
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
         {/* Context Engine Tab */}
         {activeTab === 'context' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -431,11 +588,25 @@ export function App() {
                   <div key={p.id} style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '10px', padding: '20px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
                       <h3 style={{ margin: 0, fontSize: '17px', color: '#f8fafc' }}>{p.name}</h3>
-                      <span style={{ fontSize: '11px', background: '#10b98122', color: '#10b981', padding: '2px 8px', borderRadius: '4px', fontWeight: '600' }}>
-                        {p.status}
-                      </span>
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <span style={{ fontSize: '11px', background: '#10b98122', color: '#10b981', padding: '2px 8px', borderRadius: '4px', fontWeight: '600' }}>
+                          {p.status}
+                        </span>
+                        <button
+                          onClick={() => handleSynthesizeProject(p.id)}
+                          style={{ padding: '4px 8px', background: '#1e293b', border: '1px solid #334155', borderRadius: '4px', color: '#38bdf8', fontSize: '11px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
+                          title="Synthesize project state and detect milestones"
+                        >
+                          <Sparkles size={12} /> Auto-Synthesize
+                        </button>
+                      </div>
                     </div>
                     <p style={{ fontSize: '13px', color: '#94a3b8', margin: '0 0 12px 0' }}>{p.goal || p.description || "No goal specified"}</p>
+                    {p.architecture_overview && (
+                      <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '10px' }}>
+                        <strong>Architecture:</strong> {p.architecture_overview}
+                      </div>
+                    )}
                     {p.tech_stack && p.tech_stack.length > 0 && (
                       <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '12px' }}>
                         {p.tech_stack.map((t, i) => (
@@ -443,6 +614,20 @@ export function App() {
                             {t}
                           </span>
                         ))}
+                      </div>
+                    )}
+                    {p.milestones && p.milestones.length > 0 && (
+                      <div style={{ background: '#020617', border: '1px solid #1e293b', borderRadius: '6px', padding: '10px', marginBottom: '12px' }}>
+                        <div style={{ fontSize: '11px', color: '#38bdf8', fontWeight: '600', marginBottom: '6px' }}>MILESTONES ({p.milestones.length})</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                          {p.milestones.map((ml) => (
+                            <div key={ml.id} style={{ fontSize: '11px', color: '#cbd5e1', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <span style={{ color: '#10b981' }}>✓</span>
+                              <span>{ml.title}</span>
+                              <span style={{ color: '#64748b', fontSize: '10px' }}>({ml.milestone_type})</span>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     )}
                     <div style={{ fontSize: '12px', color: '#64748b' }}>

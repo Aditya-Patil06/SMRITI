@@ -214,7 +214,7 @@ def test_canonical_export_import_validation_and_atomicity(client, test_db_sessio
     export_res = client.get("/api/v1/exports/canonical")
     assert export_res.status_code == 200
     bundle = export_res.json()
-    assert bundle["manifest"]["version"] == "1.1.0"
+    assert bundle["manifest"]["version"] == "1.2.0"
     assert len(bundle["projects"]) >= 1
 
     # Test malformed import -> 400
@@ -368,4 +368,108 @@ def test_canonical_import_preflight_collision_rejection(client, test_db_session)
     # Verify db was untouched
     ws1 = test_db_session.query(Workspace).filter(Workspace.id == "ws-1").first()
     assert ws1.user_id == "user-1"
+
+def test_phase2_api_synthesize_and_milestones(client, test_db_session):
+    # Create project and memory
+    p_res = client.post("/api/v1/projects", json={"workspace_id": "ws-1", "name": "Synthesis Project"})
+    p_id = p_res.json()["id"]
+
+    client.post("/api/v1/memories", json={
+        "workspace_id": "ws-1",
+        "project_id": p_id,
+        "memory_type": "decision",
+        "statement": "Use FastAPI for REST API backend",
+        "structured_claim": {
+            "subject": "backend",
+            "predicate": "uses_backend_framework",
+            "object": "fastapi"
+        }
+    })
+
+    # Call synthesize endpoint
+    synth_res = client.post(f"/api/v1/projects/{p_id}/synthesize")
+    assert synth_res.status_code == 200
+    data = synth_res.json()
+    assert data["status"] == "success"
+    assert "fastapi" in data["synthesis"]["tech_stack"]
+
+    # Call milestones endpoint
+    ml_res = client.get(f"/api/v1/projects/{p_id}/milestones")
+    assert ml_res.status_code == 200
+    milestones = ml_res.json()
+    assert len(milestones) >= 1
+    types = [ml["milestone_type"] for ml in milestones]
+    assert "project_created" in types
+
+def test_phase2_api_conflicts_and_resolution_flow(client, test_db_session):
+    # Create project and two competing memories
+    p_res = client.post("/api/v1/projects", json={"workspace_id": "ws-1", "name": "Conflict Project"})
+    p_id = p_res.json()["id"]
+
+    m1_res = client.post("/api/v1/memories", json={
+        "workspace_id": "ws-1",
+        "project_id": p_id,
+        "memory_type": "decision",
+        "statement": "Backend uses PostgreSQL",
+        "structured_claim": {
+            "subject": "backend",
+            "predicate": "uses_database",
+            "object": "postgresql"
+        }
+    })
+    m1_id = m1_res.json()["id"]
+
+    m2_res = client.post("/api/v1/memories", json={
+        "workspace_id": "ws-1",
+        "project_id": p_id,
+        "memory_type": "decision",
+        "statement": "Backend uses MongoDB",
+        "structured_claim": {
+            "subject": "backend",
+            "predicate": "uses_database",
+            "object": "mongodb"
+        }
+    })
+    m2_id = m2_res.json()["id"]
+
+    # List conflicts
+    confs_res = client.get(f"/api/v1/conflicts?workspace_id=ws-1&project_id={p_id}")
+    assert confs_res.status_code == 200
+    conflicts = confs_res.json()
+    assert len(conflicts) >= 1
+
+    # Resolve via conflict flow: keep_both
+    res_flow = client.post(
+        f"/api/v1/conflicts/resolve?memory_id={m1_id}&resolution_action=keep_both&paired_memory_id={m2_id}"
+    )
+    assert res_flow.status_code == 200
+    assert res_flow.json()["status"] == "success"
+
+def test_phase2_canonical_export_import_roundtrip(client, test_db_session):
+    p_res = client.post("/api/v1/projects", json={"workspace_id": "ws-1", "name": "Roundtrip Project"})
+    p_id = p_res.json()["id"]
+
+    # Add memory with structured claim
+    client.post("/api/v1/memories", json={
+        "workspace_id": "ws-1",
+        "project_id": p_id,
+        "memory_type": "decision",
+        "statement": "Use Alembic migrations",
+        "structured_claim": {
+            "subject": "database",
+            "predicate": "uses_orm",
+            "object": "alembic"
+        }
+    })
+
+    # Trigger synthesis to create milestone
+    client.post(f"/api/v1/projects/{p_id}/synthesize")
+
+    # Export canonical bundle
+    exp_res = client.get("/api/v1/exports/canonical?workspace_id=ws-1")
+    assert exp_res.status_code == 200
+    bundle = exp_res.json()
+    assert bundle["manifest"]["version"] == "1.2.0"
+    assert len(bundle["milestones"]) >= 1
+    assert any(m.get("structured_claim") is not None for m in bundle["memories"])
 

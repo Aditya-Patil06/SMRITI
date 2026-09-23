@@ -16,12 +16,14 @@ from smriti.schemas import (
     ProviderAccountRead, ProviderAccountCreate,
     ConversationRead, ConversationCreate, MessageRead,
     ProjectRead, ProjectCreate, TaskRead, TaskCreate,
+    MilestoneRead,
     MemoryRead, MemoryCreate, MemoryUpdate,
     ProvenanceExplanation, PortableContextPackage,
     GraphData, SearchResultItem
 )
 from smriti.importers import registry as importer_registry
-from smriti.extraction import MemoryExtractor
+from smriti.extraction import MemoryExtractor, HybridExtractionEngine, ClaimNormalizer
+from smriti.project_intelligence import project_intelligence_service
 from smriti.vector_store import vector_store
 from smriti.graph import graph_service
 from smriti.retrieval import retrieval_engine
@@ -61,6 +63,7 @@ app.add_middleware(
 )
 
 extractor = MemoryExtractor()
+hybrid_extractor = HybridExtractionEngine(heuristic_extractor=extractor)
 
 # --- Global Exception Handling ---
 @app.exception_handler(ValueError)
@@ -179,6 +182,27 @@ def get_project(project_id: str, workspace_id: Optional[str] = None, db: Session
     if not proj:
         raise HTTPException(status_code=404, detail="Project not found")
     return proj
+
+@app.post("/api/v1/projects/{project_id}/synthesize")
+def synthesize_project_state(project_id: str, db: Session = Depends(get_db)):
+    try:
+        synth = project_intelligence_service.synthesize_project_state(db, project_id)
+        milestones = project_intelligence_service.detect_milestones(db, project_id)
+        graph_service.sync_from_db(db)
+        return {
+            "status": "success",
+            "synthesis": synth,
+            "milestones_count": len(milestones)
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.get("/api/v1/projects/{project_id}/milestones", response_model=List[MilestoneRead])
+def list_project_milestones(project_id: str, db: Session = Depends(get_db)):
+    proj = db.query(Project).filter(Project.id == project_id).first()
+    if not proj:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project_intelligence_service.detect_milestones(db, project_id)
 
 # --- Tasks ---
 @app.post("/api/v1/tasks", response_model=TaskRead, status_code=status.HTTP_201_CREATED)
@@ -310,6 +334,7 @@ def create_memory(data: MemoryCreate, db: Session = Depends(get_db)):
         memory_type=data.memory_type,
         statement=data.statement,
         rationale=data.rationale,
+        structured_claim=data.structured_claim,
         details=data.details or {},
         status=data.status,
         confidence=data.confidence,
@@ -335,10 +360,19 @@ def explain_memory(memory_id: str, db: Session = Depends(get_db)):
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-@app.post("/api/v1/memories/{memory_id}/resolve", response_model=MemoryRead)
-def resolve_memory_conflict(
-    memory_id: str,
-    resolution_action: str = Query(..., description="keep_active, supersede, deprecate, or forget"),
+@app.get("/api/v1/conflicts")
+def get_conflicts(
+    workspace_id: str = "default-workspace",
+    project_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    return memory_manager.get_conflicts(db, workspace_id, project_id)
+
+@app.post("/api/v1/conflicts/resolve")
+def resolve_conflict_flow(
+    memory_id: str = Query(...),
+    resolution_action: str = Query(..., description="keep_active, keep_both, supersede, deprecate, or forget"),
+    paired_memory_id: Optional[str] = None,
     superseded_by_id: Optional[str] = None,
     reason: Optional[str] = None,
     db: Session = Depends(get_db)
@@ -349,6 +383,38 @@ def resolve_memory_conflict(
             memory_id=memory_id,
             resolution_action=resolution_action,
             superseded_by_id=superseded_by_id,
+            paired_memory_id=paired_memory_id,
+            reason=reason
+        )
+        if mem.status == "forgotten":
+            vector_store.delete(mem.id)
+        else:
+            vector_store.upsert(
+                mem.id,
+                f"{mem.statement} {mem.rationale or ''}",
+                {"workspace_id": mem.workspace_id, "project_id": mem.project_id, "status": mem.status}
+            )
+        graph_service.sync_from_db(db)
+        return {"status": "success", "resolved_memory": mem.id, "action": resolution_action}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/v1/memories/{memory_id}/resolve", response_model=MemoryRead)
+def resolve_memory_conflict(
+    memory_id: str,
+    resolution_action: str = Query(..., description="keep_active, keep_both, supersede, deprecate, or forget"),
+    paired_memory_id: Optional[str] = None,
+    superseded_by_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    try:
+        mem = memory_manager.resolve_conflict(
+            db=db,
+            memory_id=memory_id,
+            resolution_action=resolution_action,
+            superseded_by_id=superseded_by_id,
+            paired_memory_id=paired_memory_id,
             reason=reason
         )
         if mem.status == "forgotten":
@@ -433,13 +499,26 @@ def import_conversations(
 
         if auto_extract:
             for msg in db_messages:
-                candidates = extractor.extract_from_message(msg.role, msg.content)
+                candidates = hybrid_extractor.extract(msg.role, msg.content, use_llm=True)
                 if candidates:
-                    existing_mems = db.query(Memory).filter(Memory.project_id == project_id).all() if project_id else []
-                    diffs = memory_manager.record_diff(db, existing_mems, candidates)
-                    all_diffs.extend(diffs)
+                    existing_mems = db.query(Memory).filter(Memory.workspace_id == ws_id).all()
+                    diffs = memory_manager.record_diff(db, existing_mems, candidates, workspace_id=ws_id, project_id=project_id)
+                    all_diffs.extend([d.model_dump() for d in diffs])
 
-                    for cand in candidates:
+                    for cand, diff in zip(candidates, diffs):
+                        # If duplicate / unchanged, skip re-inserting
+                        if diff.change_type == "UNCHANGED":
+                            continue
+
+                        # If candidate supersedes an existing active memory
+                        if diff.change_type == "SUPERSEDED" and diff.existing_memory_id:
+                            old_mem = db.query(Memory).filter(Memory.id == diff.existing_memory_id).first()
+                            if old_mem:
+                                old_mem.status = "superseded"
+                                old_mem.updated_at = datetime.now(timezone.utc)
+
+                        cand_status = "review_required" if diff.review_required else cand.status
+
                         mem = Memory(
                             workspace_id=ws_id,
                             project_id=project_id,
@@ -448,14 +527,30 @@ def import_conversations(
                             memory_type=cand.memory_type,
                             statement=cand.statement,
                             rationale=cand.rationale,
+                            structured_claim=cand.structured_claim,
                             details=cand.details,
-                            status=cand.status,
+                            status=cand_status,
                             confidence=cand.confidence,
-                            extraction_method="rule_heuristic"
+                            extraction_method="hybrid_llm_rule"
                         )
                         db.add(mem)
                         db.commit()
                         db.refresh(mem)
+
+                        if diff.change_type == "SUPERSEDED" and diff.existing_memory_id:
+                            mem.superseded_by_id = None  # this is the new one
+                            old_mem = db.query(Memory).filter(Memory.id == diff.existing_memory_id).first()
+                            if old_mem:
+                                old_mem.superseded_by_id = mem.id
+                                graph_service.add_edge(
+                                    db=db,
+                                    source_type="memory",
+                                    source_id=mem.id,
+                                    relation="SUPERSEDES",
+                                    target_type="memory",
+                                    target_id=old_mem.id
+                                )
+
                         vector_store.upsert(
                             mem.id,
                             f"{mem.statement} {mem.rationale or ''}",
