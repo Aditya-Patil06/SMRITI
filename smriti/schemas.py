@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from pydantic import BaseModel, ConfigDict, Field
 
 # --- User & Workspace ---
@@ -74,7 +74,7 @@ class ConversationRead(ConversationBase):
     messages: List[MessageRead] = []
     model_config = ConfigDict(from_attributes=True)
 
-# --- Project & Tasks ---
+# --- Project & Tasks & Milestones ---
 class TaskBase(BaseModel):
     title: str
     description: Optional[str] = None
@@ -90,6 +90,22 @@ class TaskRead(TaskBase):
     project_id: str
     created_at: datetime
     updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+class MilestoneBase(BaseModel):
+    title: str
+    description: Optional[str] = None
+    milestone_type: str  # project_created, architecture_decided, technology_selected, feature_completed, phase_completed
+    evidence_memory_id: Optional[str] = None
+    reached_at: Optional[datetime] = None
+
+class MilestoneCreate(MilestoneBase):
+    project_id: str
+
+class MilestoneRead(MilestoneBase):
+    id: str
+    project_id: str
+    created_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
 class ProjectBase(BaseModel):
@@ -112,13 +128,22 @@ class ProjectRead(ProjectBase):
     updated_at: datetime
     last_confirmed_at: datetime
     tasks: List[TaskRead] = []
+    milestones: List[MilestoneRead] = []
     model_config = ConfigDict(from_attributes=True)
 
-# --- Memory ---
+# --- Memory & Claims ---
+class StructuredClaim(BaseModel):
+    subject: str
+    predicate: str
+    object: str
+    scope: Optional[Dict[str, Any]] = None  # e.g. {"env": "prod", "component": "backend"}
+    temporal_context: Optional[str] = None
+
 class MemoryBase(BaseModel):
     memory_type: str
     statement: str
     rationale: Optional[str] = None
+    structured_claim: Optional[StructuredClaim] = None
     details: Optional[Dict[str, Any]] = None
     status: str = "active"
     confidence: float = 1.0
@@ -133,6 +158,7 @@ class MemoryCreate(MemoryBase):
 class MemoryUpdate(BaseModel):
     statement: Optional[str] = None
     rationale: Optional[str] = None
+    structured_claim: Optional[StructuredClaim] = None
     status: Optional[str] = None
     confidence: Optional[float] = None
     change_reason: Optional[str] = None

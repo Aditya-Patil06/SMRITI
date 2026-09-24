@@ -214,7 +214,7 @@ def test_canonical_export_import_validation_and_atomicity(client, test_db_sessio
     export_res = client.get("/api/v1/exports/canonical")
     assert export_res.status_code == 200
     bundle = export_res.json()
-    assert bundle["manifest"]["version"] == "1.1.0"
+    assert bundle["manifest"]["version"] == "1.2.0"
     assert len(bundle["projects"]) >= 1
 
     # Test malformed import -> 400
@@ -368,4 +368,202 @@ def test_canonical_import_preflight_collision_rejection(client, test_db_session)
     # Verify db was untouched
     ws1 = test_db_session.query(Workspace).filter(Workspace.id == "ws-1").first()
     assert ws1.user_id == "user-1"
+
+def test_phase2_api_synthesize_and_milestones(client, test_db_session):
+    # Create project and memory
+    p_res = client.post("/api/v1/projects", json={"workspace_id": "ws-1", "name": "Synthesis Project"})
+    p_id = p_res.json()["id"]
+
+    client.post("/api/v1/memories", json={
+        "workspace_id": "ws-1",
+        "project_id": p_id,
+        "memory_type": "decision",
+        "statement": "Use FastAPI for REST API backend",
+        "structured_claim": {
+            "subject": "backend",
+            "predicate": "uses_backend_framework",
+            "object": "fastapi"
+        }
+    })
+
+    # Call synthesize endpoint
+    synth_res = client.post(f"/api/v1/projects/{p_id}/synthesize")
+    assert synth_res.status_code == 200
+    data = synth_res.json()
+    assert data["status"] == "success"
+    assert "fastapi" in data["synthesis"]["tech_stack"]
+
+    # Call milestones endpoint twice to verify read-only behavior
+    ml_res = client.get(f"/api/v1/projects/{p_id}/milestones")
+    assert ml_res.status_code == 200
+    milestones = ml_res.json()
+    assert len(milestones) >= 1
+    types = [ml["milestone_type"] for ml in milestones]
+    assert "project_created" in types
+
+    ml_res_again = client.get(f"/api/v1/projects/{p_id}/milestones")
+    assert ml_res_again.status_code == 200
+    assert len(ml_res_again.json()) == len(milestones)
+
+def test_phase2_api_conflicts_and_resolution_flow(client, test_db_session):
+    # Create project and two competing memories
+    p_res = client.post("/api/v1/projects", json={"workspace_id": "ws-1", "name": "Conflict Project"})
+    p_id = p_res.json()["id"]
+
+    m1_res = client.post("/api/v1/memories", json={
+        "workspace_id": "ws-1",
+        "project_id": p_id,
+        "memory_type": "decision",
+        "statement": "Backend uses PostgreSQL",
+        "structured_claim": {
+            "subject": "backend",
+            "predicate": "uses_database",
+            "object": "postgresql"
+        }
+    })
+    m1_id = m1_res.json()["id"]
+
+    m2_res = client.post("/api/v1/memories", json={
+        "workspace_id": "ws-1",
+        "project_id": p_id,
+        "memory_type": "decision",
+        "statement": "Backend uses MongoDB",
+        "structured_claim": {
+            "subject": "backend",
+            "predicate": "uses_database",
+            "object": "mongodb"
+        }
+    })
+    m2_id = m2_res.json()["id"]
+
+    # List conflicts
+    confs_res = client.get(f"/api/v1/conflicts?workspace_id=ws-1&project_id={p_id}")
+    assert confs_res.status_code == 200
+    conflicts = confs_res.json()
+    assert len(conflicts) >= 1
+
+    # Resolve via conflict flow: keep_both
+    res_flow = client.post(
+        f"/api/v1/conflicts/resolve?memory_id={m1_id}&resolution_action=keep_both&paired_memory_id={m2_id}"
+    )
+    assert res_flow.status_code == 200
+    assert res_flow.json()["status"] == "success"
+
+    # Verify both m1 and m2 are in vector store with active status
+    assert m1_id in vector_store.metadata
+    assert vector_store.metadata[m1_id]["status"] == "active"
+    assert m2_id in vector_store.metadata
+    assert vector_store.metadata[m2_id]["status"] == "active"
+
+def test_phase2_canonical_export_import_roundtrip(client, test_db_session):
+    p_res = client.post("/api/v1/projects", json={"workspace_id": "ws-1", "name": "Roundtrip Project"})
+    p_id = p_res.json()["id"]
+
+    # Add memory with structured claim
+    client.post("/api/v1/memories", json={
+        "workspace_id": "ws-1",
+        "project_id": p_id,
+        "memory_type": "decision",
+        "statement": "Use Alembic migrations",
+        "structured_claim": {
+            "subject": "database",
+            "predicate": "uses_orm",
+            "object": "alembic"
+        }
+    })
+
+    # Trigger synthesis to create milestone
+    client.post(f"/api/v1/projects/{p_id}/synthesize")
+
+    # Export canonical bundle
+    exp_res = client.get("/api/v1/exports/canonical?workspace_id=ws-1")
+    assert exp_res.status_code == 200
+    bundle = exp_res.json()
+    assert bundle["manifest"]["version"] == "1.2.0"
+    assert len(bundle["milestones"]) >= 1
+    assert any(m.get("structured_claim") is not None for m in bundle["memories"])
+
+def test_import_conversations_supersession_syncs_vector_store(client, test_db_session):
+    p_res = client.post("/api/v1/projects", json={"workspace_id": "ws-1", "name": "Import Supersede Project"})
+    p_id = p_res.json()["id"]
+
+    # Initial conversation establishing PostgreSQL
+    payload1 = [{
+        "id": "conv-super-1",
+        "title": "Database setup",
+        "create_time": 1710000000,
+        "mapping": {
+            "n1": {
+                "message": {
+                    "id": "msg-1",
+                    "author": {"role": "user"},
+                    "content": {"parts": ["We decided to implement PostgreSQL for data persistence."]},
+                    "create_time": 1710000001
+                }
+            }
+        }
+    }]
+    res1 = client.post(f"/api/v1/imports/conversations?provider=chatgpt&workspace_id=ws-1&project_id={p_id}", json=payload1)
+    assert res1.status_code == 200
+
+    # Retrieve created memory
+    mems = client.get(f"/api/v1/memories?workspace_id=ws-1&project_id={p_id}").json()
+    assert len(mems) >= 1
+    decision_mem = next(m for m in mems if "PostgreSQL" in m["statement"] and m["memory_type"] == "decision")
+    m1_id = decision_mem["id"]
+    assert vector_store.metadata[m1_id]["status"] == "active"
+
+    # Second conversation explicitly superseding PostgreSQL with SQLite
+    payload2 = [{
+        "id": "conv-super-2",
+        "title": "Database migration",
+        "create_time": 1710000010,
+        "mapping": {
+            "n2": {
+                "message": {
+                    "id": "msg-2",
+                    "author": {"role": "user"},
+                    "content": {"parts": ["We switched to SQLite instead of PostgreSQL for testing."]},
+                    "create_time": 1710000011
+                }
+            }
+        }
+    }]
+    res2 = client.post(f"/api/v1/imports/conversations?provider=chatgpt&workspace_id=ws-1&project_id={p_id}", json=payload2)
+    assert res2.status_code == 200
+
+    # Old memory vector store metadata MUST now be superseded
+    assert vector_store.metadata[m1_id]["status"] == "superseded"
+
+    # Verify search with include_superseded=False filters it out
+    search_res = client.get(f"/api/v1/search?query=PostgreSQL&workspace_id=ws-1&project_id={p_id}&include_superseded=false").json()
+    assert not any(item["id"] == m1_id for item in search_res)
+
+def test_structured_claim_schema_validation(client, test_db_session):
+    # Valid structured claim
+    valid_res = client.post("/api/v1/memories", json={
+        "workspace_id": "ws-1",
+        "memory_type": "decision",
+        "statement": "Valid claim test",
+        "structured_claim": {
+            "subject": "backend",
+            "predicate": "uses_database",
+            "object": "postgresql"
+        }
+    })
+    assert valid_res.status_code == 201
+    assert valid_res.json()["structured_claim"]["subject"] == "backend"
+
+    # Invalid structured claim (missing required fields e.g. predicate and object)
+    invalid_res = client.post("/api/v1/memories", json={
+        "workspace_id": "ws-1",
+        "memory_type": "decision",
+        "statement": "Invalid claim test",
+        "structured_claim": {
+            "subject": "backend"
+            # predicate and object missing
+        }
+    })
+    assert invalid_res.status_code == 422
+
 
