@@ -77,19 +77,38 @@ class ProjectIntelligenceService:
         now = datetime.now(timezone.utc)
         changes = {}
 
-        if not proj.goal and derived_goal:
-            proj.goal = derived_goal
-            changes["goal"] = derived_goal
+        is_user_confirmed = proj.last_confirmed_at is not None
 
-        sorted_tech = sorted(list(derived_tech_stack))
-        if sorted_tech != (proj.tech_stack or []):
-            proj.tech_stack = sorted_tech
-            changes["tech_stack"] = sorted_tech
+        if is_user_confirmed:
+            # Preserve explicitly populated fields, but populate empty ones
+            if not proj.goal and derived_goal:
+                proj.goal = derived_goal
+                changes["goal"] = derived_goal
 
-        sorted_constraints = sorted(list(derived_constraints))
-        if sorted_constraints != (proj.constraints or []):
-            proj.constraints = sorted_constraints
-            changes["constraints"] = sorted_constraints
+            if not proj.tech_stack and derived_tech_stack:
+                sorted_tech = sorted(list(derived_tech_stack))
+                proj.tech_stack = sorted_tech
+                changes["tech_stack"] = sorted_tech
+
+            if not proj.constraints and derived_constraints:
+                sorted_constraints = sorted(list(derived_constraints))
+                proj.constraints = sorted_constraints
+                changes["constraints"] = sorted_constraints
+        else:
+            # Rebuild derived fields completely, discarding stale values
+            if derived_goal and derived_goal != proj.goal:
+                proj.goal = derived_goal
+                changes["goal"] = derived_goal
+
+            sorted_tech = sorted(list(derived_tech_stack))
+            if sorted_tech != (proj.tech_stack or []):
+                proj.tech_stack = sorted_tech
+                changes["tech_stack"] = sorted_tech
+
+            sorted_constraints = sorted(list(derived_constraints))
+            if sorted_constraints != (proj.constraints or []):
+                proj.constraints = sorted_constraints
+                changes["constraints"] = sorted_constraints
 
         if architecture_points and not proj.architecture_overview:
             overview = "; ".join(architecture_points[:5])

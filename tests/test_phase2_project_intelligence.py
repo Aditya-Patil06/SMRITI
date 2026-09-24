@@ -188,6 +188,8 @@ def test_synthesis_rebuilds_and_removes_stale_tech_from_project_model(db_session
     )
     db_session.add(proj)
     db_session.commit()
+    proj.last_confirmed_at = None
+    db_session.commit()
 
     # Only new active memories exist: PostgreSQL and FastAPI
     m1 = Memory(
@@ -220,4 +222,84 @@ def test_synthesis_rebuilds_and_removes_stale_tech_from_project_model(db_session
     assert "postgresql" in proj.tech_stack
     assert "fastapi" in proj.tech_stack
     assert proj.tech_stack == ["fastapi", "postgresql"]
+
+
+def test_synthesis_preserves_confirmed_and_rebuilds_derived(db_session):
+    service = ProjectIntelligenceService()
+    now = datetime.now(timezone.utc)
+
+    # 1. Confirmed project with explicit values (must be preserved)
+    proj_conf_full = Project(
+        id="p-conf-full",
+        workspace_id="ws-1",
+        name="Confirmed Full",
+        tech_stack=["user-tech"],
+        constraints=["user-constraint"],
+        status="active"
+    )
+    # 2. Confirmed project with empty values (must be populated from memories)
+    proj_conf_empty = Project(
+        id="p-conf-empty",
+        workspace_id="ws-1",
+        name="Confirmed Empty",
+        tech_stack=[],
+        constraints=[],
+        status="active"
+    )
+    # 3. Unconfirmed project (must rebuild from scratch, dropping stale)
+    proj_unconf = Project(
+        id="p-unconf",
+        workspace_id="ws-1",
+        name="Unconfirmed",
+        tech_stack=["stale-tech"],
+        status="active"
+    )
+    db_session.add_all([proj_conf_full, proj_conf_empty, proj_unconf])
+    db_session.commit()
+
+    # Force unconfirmed project to be unconfirmed
+    proj_unconf.last_confirmed_at = None
+    db_session.commit()
+
+    # Memory for conf_full (should be ignored)
+    m_full = Memory(
+        id="m-full", workspace_id="ws-1", project_id="p-conf-full",
+        memory_type="technology", statement="Uses unwanted-tech",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "unwanted-tech"},
+        status="active"
+    )
+    # Memory for conf_empty (should populate it)
+    m_empty = Memory(
+        id="m-empty", workspace_id="ws-1", project_id="p-conf-empty",
+        memory_type="technology", statement="Uses fresh-tech",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "fresh-tech"},
+        status="active"
+    )
+    # Memory for unconf (should rebuild, dropping stale-tech)
+    m_unconf = Memory(
+        id="m-unconf", workspace_id="ws-1", project_id="p-unconf",
+        memory_type="technology", statement="Uses fresh-tech",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "fresh-tech"},
+        status="active"
+    )
+    db_session.add_all([m_full, m_empty, m_unconf])
+    db_session.commit()
+
+    service.synthesize_project_state(db_session, "p-conf-full")
+    service.synthesize_project_state(db_session, "p-conf-empty")
+    service.synthesize_project_state(db_session, "p-unconf")
+    db_session.refresh(proj_conf_full)
+    db_session.refresh(proj_conf_empty)
+    db_session.refresh(proj_unconf)
+
+    # 1. Preserved
+    assert proj_conf_full.tech_stack == ["user-tech"]
+    assert "unwanted-tech" not in proj_conf_full.tech_stack
+
+    # 2. Populated
+    assert proj_conf_empty.tech_stack == ["fresh-tech"]
+
+    # 3. Rebuilt and stale dropped
+    assert "fresh-tech" in proj_unconf.tech_stack
+    assert "stale-tech" not in proj_unconf.tech_stack
 
