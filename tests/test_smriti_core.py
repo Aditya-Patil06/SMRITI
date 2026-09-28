@@ -163,13 +163,21 @@ def test_context_engine_generation(db_session):
     assert "MediaPipe" in ctx.formatted_prompt
 
 def test_canonical_export_roundtrip(db_session):
+    from datetime import datetime, timezone
     proj = Project(
         id="proj-roundtrip",
         workspace_id="test-ws",
         name="Export Test",
         goal="Verify zero semantic loss"
     )
-    db_session.add(proj)
+    proj_confirmed = Project(
+        id="proj-confirmed",
+        workspace_id="test-ws",
+        name="Confirmed Export Test",
+        goal="Verify timestamp",
+        last_confirmed_at=datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    )
+    db_session.add_all([proj, proj_confirmed])
     mem = Memory(
         id="mem-rt",
         workspace_id="test-ws",
@@ -199,6 +207,14 @@ def test_canonical_export_roundtrip(db_session):
     imported_mem = fresh_session.query(Memory).filter(Memory.id == "mem-rt").first()
     assert imported_mem is not None
     assert imported_mem.statement == "Deterministic testing"
+
+    imported_proj = fresh_session.query(Project).filter(Project.id == "proj-roundtrip").first()
+    assert imported_proj is not None
+    assert imported_proj.last_confirmed_at is None
+
+    imported_proj_conf = fresh_session.query(Project).filter(Project.id == "proj-confirmed").first()
+    assert imported_proj_conf is not None
+    assert imported_proj_conf.last_confirmed_at.replace(tzinfo=timezone.utc) == datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 def test_provider_capability_discovery():
     reg = ProviderAdapterRegistry()

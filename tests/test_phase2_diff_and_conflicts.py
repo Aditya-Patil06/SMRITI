@@ -413,3 +413,66 @@ def test_keep_both_persists_coexistence_edge_and_prevents_duplicate_conflicts(db
     subsequent_conflicts = manager.get_conflicts(db_session, "ws-1", "p1")
     assert len(subsequent_conflicts) == 0
 
+
+def test_word_boundary_matching_for_supersession(db_session):
+    diff_engine = MemoryDiffEngine()
+
+    existing = [
+        Memory(
+            id="mem-java",
+            workspace_id="ws-1",
+            memory_type="technology",
+            statement="Uses java",
+            status="active",
+            structured_claim={"subject": "project", "predicate": "uses_language", "object": "java"}
+        ),
+        Memory(
+            id="mem-go",
+            workspace_id="ws-1",
+            memory_type="technology",
+            statement="Uses go",
+            status="active",
+            structured_claim={"subject": "project", "predicate": "uses_language", "object": "go"}
+        ),
+        Memory(
+            id="mem-sql-server",
+            workspace_id="ws-1",
+            memory_type="technology",
+            statement="Uses sql server",
+            status="active",
+            structured_claim={"subject": "project", "predicate": "uses_database", "object": "sql server"}
+        )
+    ]
+
+    # Candidate 1: "javascript instead of java" -> should supersede mem-java, but "javascript instead of python" should NOT supersede mem-java
+    cand_false_positive = ExtractedCandidate(
+        memory_type="technology",
+        statement="Uses javascript instead of python",
+        confidence=0.9,
+        status="active",
+        structured_claim={"subject": "project", "predicate": "uses_language", "object": "javascript"}
+    )
+    res_false = diff_engine.classify_diff(cand_false_positive, existing, "ws-1")
+    # It should be NEW, not SUPERSEDED (java is a substring of javascript, but should not match)
+    assert res_false.change_type != "SUPERSEDED"
+
+    cand_go_false = ExtractedCandidate(
+        memory_type="technology",
+        statement="Uses going instead of python",
+        confidence=0.9,
+        status="active",
+        structured_claim={"subject": "project", "predicate": "uses_language", "object": "going"}
+    )
+    res_go_false = diff_engine.classify_diff(cand_go_false, existing, "ws-1")
+    assert res_go_false.change_type != "SUPERSEDED"
+
+    cand_sql_server = ExtractedCandidate(
+        memory_type="technology",
+        statement="Uses postgresql instead of sql server",
+        confidence=0.9,
+        status="active",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "postgresql"}
+    )
+    res_sql = diff_engine.classify_diff(cand_sql_server, existing, "ws-1")
+    assert res_sql.change_type == "SUPERSEDED"
+    assert res_sql.existing_memory_id == "mem-sql-server"

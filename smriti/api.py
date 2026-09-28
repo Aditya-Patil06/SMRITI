@@ -534,6 +534,7 @@ def import_conversations(
 
         if auto_extract:
             for msg in db_messages:
+                actual_method = "hybrid_llm_rule" if hybrid_extractor.llm_extractor else "rule_heuristic"
                 candidates = hybrid_extractor.extract(msg.role, msg.content, use_llm=True)
                 if candidates:
                     existing_mems = db.query(Memory).filter(Memory.workspace_id == ws_id).all()
@@ -545,12 +546,8 @@ def import_conversations(
                         if diff.change_type == "UNCHANGED":
                             continue
 
-                        # If candidate supersedes an existing active memory
-                        if diff.change_type == "SUPERSEDED" and diff.existing_memory_id:
-                            old_mem = db.query(Memory).filter(Memory.id == diff.existing_memory_id).first()
-                            if old_mem:
-                                old_mem.status = "superseded"
-                                old_mem.updated_at = datetime.now(timezone.utc)
+                        # If candidate supersedes an existing active memory, we don't need to do it here,
+                        # we can do it all in the post-creation block below to ensure atomic relationships.
 
                         cand_status = "review_required" if diff.review_required else cand.status
 
@@ -566,7 +563,7 @@ def import_conversations(
                             details=cand.details,
                             status=cand_status,
                             confidence=cand.confidence,
-                            extraction_method="hybrid_llm_rule"
+                            extraction_method=actual_method
                         )
                         db.add(mem)
                         db.commit()
@@ -575,36 +572,53 @@ def import_conversations(
                         if diff.change_type == "SUPERSEDED" and diff.existing_memory_id:
                             mem.superseded_by_id = None  # this is the new one
                             old_mem = db.query(Memory).filter(Memory.id == diff.existing_memory_id).first()
-                            if old_mem:
-                                old_mem.superseded_by_id = mem.id
-                                old_mem.status = "superseded"
-                                old_mem.updated_at = datetime.now(timezone.utc)
-                                old_version = MemoryVersion(
-                                    memory_id=old_mem.id,
-                                    version_number=round(old_mem.version + 1.0, 1),
-                                    statement=old_mem.statement,
-                                    rationale=old_mem.rationale,
-                                    structured_claim=old_mem.structured_claim,
-                                    details=old_mem.details,
-                                    status="superseded",
-                                    change_reason=f"Superseded during conversation import by {mem.id}"
-                                )
-                                old_mem.version = old_version.version_number
-                                db.add(old_version)
-                                db.commit()
-                                vector_store.upsert(
-                                    old_mem.id,
-                                    f"{old_mem.statement} {old_mem.rationale or ''}",
-                                    {"workspace_id": old_mem.workspace_id, "project_id": old_mem.project_id, "status": "superseded"}
-                                )
-                                graph_service.add_edge(
-                                    db=db,
-                                    source_type="memory",
-                                    source_id=mem.id,
-                                    relation="SUPERSEDES",
-                                    target_type="memory",
-                                    target_id=old_mem.id
-                                )
+                            if old_mem and old_mem.structured_claim:
+                                subject = old_mem.structured_claim.get("subject")
+                                predicate = old_mem.structured_claim.get("predicate")
+                                obj = old_mem.structured_claim.get("object")
+
+                                if subject and predicate and obj:
+                                    all_active = db.query(Memory).filter(
+                                        Memory.workspace_id == ws_id,
+                                        Memory.status == "active"
+                                    ).all()
+
+                                    mems_to_supersede = []
+                                    for act_mem in all_active:
+                                        if act_mem.structured_claim and act_mem.structured_claim.get("subject") == subject and act_mem.structured_claim.get("predicate") == predicate and act_mem.structured_claim.get("object") == obj:
+                                            mems_to_supersede.append(act_mem)
+
+                                    for t_mem in mems_to_supersede:
+                                        t_mem.superseded_by_id = mem.id
+                                        t_mem.status = "superseded"
+                                        t_mem.updated_at = datetime.now(timezone.utc)
+                                        t_version = MemoryVersion(
+                                            memory_id=t_mem.id,
+                                            version_number=round(t_mem.version + 1.0, 1),
+                                            statement=t_mem.statement,
+                                            rationale=t_mem.rationale,
+                                            structured_claim=t_mem.structured_claim,
+                                            details=t_mem.details,
+                                            status="superseded",
+                                            change_reason=f"Superseded during conversation import by {mem.id}"
+                                        )
+                                        t_mem.version = t_version.version_number
+                                        db.add(t_version)
+
+                                        vector_store.upsert(
+                                            t_mem.id,
+                                            f"{t_mem.statement} {t_mem.rationale or ''}",
+                                            {"workspace_id": t_mem.workspace_id, "project_id": t_mem.project_id, "status": "superseded"}
+                                        )
+                                        graph_service.add_edge(
+                                            db=db,
+                                            source_type="memory",
+                                            source_id=mem.id,
+                                            relation="SUPERSEDES",
+                                            target_type="memory",
+                                            target_id=t_mem.id
+                                        )
+                                    db.commit()
 
                         vector_store.upsert(
                             mem.id,

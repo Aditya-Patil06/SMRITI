@@ -351,8 +351,10 @@ class CanonicalExportEngine:
             "memory_versions": 0, "relationships": 0, "audit_logs": 0
         }
 
-        def parse_dt(val):
-            return parser.parse(val) if val else datetime.now(timezone.utc)
+        def parse_dt(val, default_now=True):
+            if val:
+                return parser.parse(val)
+            return datetime.now(timezone.utc) if default_now else None
 
         # Atomic transaction
         try:
@@ -429,7 +431,7 @@ class CanonicalExportEngine:
                         constraints=p_data.get("constraints", []),
                         created_at=parse_dt(p_data.get("created_at")),
                         updated_at=parse_dt(p_data.get("updated_at")),
-                        last_confirmed_at=parse_dt(p_data.get("last_confirmed_at"))
+                        last_confirmed_at=parse_dt(p_data.get("last_confirmed_at"), default_now=False)
                     )
                     db.add(p)
                     counts["projects"] += 1

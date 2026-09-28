@@ -126,7 +126,7 @@ class ProjectRead(ProjectBase):
     workspace_id: str
     created_at: datetime
     updated_at: datetime
-    last_confirmed_at: datetime
+    last_confirmed_at: Optional[datetime] = None
     tasks: List[TaskRead] = []
     milestones: List[MilestoneRead] = []
     model_config = ConfigDict(from_attributes=True)

@@ -42,6 +42,14 @@ class MemoryDiffEngine:
         "requires_compliance"
     }
 
+    @staticmethod
+    def _contains_word(text: str, word: str) -> bool:
+        if not word:
+            return False
+        escaped = re.escape(word.lower())
+        pattern = r'(?:^|\W)' + escaped + r'(?:$|\W)'
+        return bool(re.search(pattern, text.lower()))
+
     def _match_structured_supersession(
         self,
         candidate: ExtractedCandidate,
@@ -79,8 +87,7 @@ class MemoryDiffEngine:
         # 2. Replacement keyword in candidate statement referencing old object
         if has_replacement_kw and old_obj:
             cand_stmt_lower = candidate.statement.lower()
-            cand_words = set(re.findall(r"\b\w+\b", cand_stmt_lower))
-            if old_obj in cand_words or old_obj in cand_stmt_lower:
+            if self._contains_word(cand_stmt_lower, old_obj):
                 if not cand_claim or (
                     cand_claim.get("subject") == old_subj and cand_claim.get("predicate") == old_pred
                 ):
@@ -114,7 +121,7 @@ class MemoryDiffEngine:
 
         old_stmt_lower = old.statement.strip().lower()
 
-        if cand_replaces and (cand_replaces in old_stmt_lower):
+        if cand_replaces and self._contains_word(old_stmt_lower, cand_replaces):
             return DiffResult(
                 change_type="SUPERSEDED",
                 candidate_statement=candidate.statement,

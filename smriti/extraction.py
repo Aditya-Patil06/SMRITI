@@ -457,11 +457,27 @@ class MemoryExtractor:
         seen_tech = set()
         # If there's an explicit replacement in the content, determine what was replaced so we don't extract it as an active technology
         replaced_tokens = set()
-        for rep_kw in ["instead of", "replaces", "replaced by", "supersedes", "deprecated in favor of"]:
-            if rep_kw in content.lower():
-                matches = re.findall(rf"{rep_kw}\s+([A-Za-z0-9_\-]+)", content, re.IGNORECASE)
-                for m in matches:
-                    replaced_tokens.add(ClaimNormalizer.normalize_token(m))
+
+        # Passive voice: [Replaced] replaced by/deprecated in favor of [New]
+        passive_patterns = [
+            re.compile(r"([A-Za-z0-9_\-]+)\s+is\s+replaced\s+by", re.IGNORECASE),
+            re.compile(r"([A-Za-z0-9_\-]+)\s+was\s+replaced\s+by", re.IGNORECASE),
+            re.compile(r"([A-Za-z0-9_\-]+)\s+replaced\s+by", re.IGNORECASE),
+            re.compile(r"([A-Za-z0-9_\-]+)\s+is\s+deprecated\s+in\s+favor\s+of", re.IGNORECASE),
+            re.compile(r"([A-Za-z0-9_\-]+)\s+was\s+deprecated\s+in\s+favor\s+of", re.IGNORECASE),
+            re.compile(r"([A-Za-z0-9_\-]+)\s+deprecated\s+in\s+favor\s+of", re.IGNORECASE)
+        ]
+
+        # Active voice: [New] instead of/replaces/supersedes [Replaced]
+        active_patterns = [
+            re.compile(r"instead\s+of\s+([A-Za-z0-9_\-]+)", re.IGNORECASE),
+            re.compile(r"replaces\s+([A-Za-z0-9_\-]+)", re.IGNORECASE),
+            re.compile(r"supersedes\s+([A-Za-z0-9_\-]+)", re.IGNORECASE)
+        ]
+
+        for pat in passive_patterns + active_patterns:
+            for match in pat.finditer(content):
+                replaced_tokens.add(ClaimNormalizer.normalize_token(match.group(1)))
 
         for pat in self.TECH_PATTERNS:
             for match in pat.finditer(content):

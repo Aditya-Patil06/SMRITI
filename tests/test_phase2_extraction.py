@@ -144,3 +144,34 @@ def test_hybrid_engine_llm_failure_logs_warning_and_falls_back(caplog):
     assert len(candidates) >= 1
     assert candidates[0].memory_type == "decision"
 
+
+def test_heuristic_replacement_direction():
+    heuristic = MemoryExtractor()
+
+    # 1. Active voice
+    cands = heuristic.extract_from_message("user", "Let's use SQLite instead of PostgreSQL for dev.")
+    techs = [c for c in cands if c.memory_type == "technology"]
+    objects = [c.structured_claim.get("object") for c in techs if c.structured_claim]
+    assert "sqlite" in objects
+    assert "postgresql" not in objects
+
+    # 2. Active voice replaces
+    cands = heuristic.extract_from_message("user", "SQLite replaces PostgreSQL")
+    techs = [c for c in cands if c.memory_type == "technology"]
+    objects = [c.structured_claim.get("object") for c in techs if c.structured_claim]
+    assert "sqlite" in objects
+    assert "postgresql" not in objects
+
+    # 3. Passive voice replaced by
+    cands = heuristic.extract_from_message("user", "PostgreSQL is replaced by SQLite")
+    techs = [c for c in cands if c.memory_type == "technology"]
+    objects = [c.structured_claim.get("object") for c in techs if c.structured_claim]
+    assert "sqlite" in objects
+    assert "postgresql" not in objects
+
+    # 4. Passive voice deprecated in favor of
+    cands = heuristic.extract_from_message("user", "PostgreSQL deprecated in favor of SQLite")
+    techs = [c for c in cands if c.memory_type == "technology"]
+    objects = [c.structured_claim.get("object") for c in techs if c.structured_claim]
+    assert "sqlite" in objects
+    assert "postgresql" not in objects

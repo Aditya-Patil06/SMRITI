@@ -188,8 +188,6 @@ def test_synthesis_rebuilds_and_removes_stale_tech_from_project_model(db_session
     )
     db_session.add(proj)
     db_session.commit()
-    proj.last_confirmed_at = None
-    db_session.commit()
 
     # Only new active memories exist: PostgreSQL and FastAPI
     m1 = Memory(
@@ -257,9 +255,11 @@ def test_synthesis_preserves_confirmed_and_rebuilds_derived(db_session):
     db_session.add_all([proj_conf_full, proj_conf_empty, proj_unconf])
     db_session.commit()
 
-    # Force unconfirmed project to be unconfirmed
-    proj_unconf.last_confirmed_at = None
+    proj_conf_full.last_confirmed_at = now
+    proj_conf_empty.last_confirmed_at = now
     db_session.commit()
+
+    # Force unconfirmed project to be unconfirmed
 
     # Memory for conf_full (should be ignored)
     m_full = Memory(

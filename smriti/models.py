@@ -91,7 +91,7 @@ class Project(Base):
     constraints = Column(JSON, default=list)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow)
-    last_confirmed_at = Column(DateTime, default=utcnow)
+    last_confirmed_at = Column(DateTime, nullable=True, default=None)
 
     workspace = relationship("Workspace", back_populates="projects")
     memories = relationship("Memory", back_populates="project")
