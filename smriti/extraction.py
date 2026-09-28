@@ -458,26 +458,35 @@ class MemoryExtractor:
         # If there's an explicit replacement in the content, determine what was replaced so we don't extract it as an active technology
         replaced_tokens = set()
 
+        # Keep mapping of new_tech -> old_tech
+        new_to_old = {}
+
         # Passive voice: [Replaced] replaced by/deprecated in favor of [New]
         passive_patterns = [
-            re.compile(r"([A-Za-z0-9_\-]+)\s+is\s+replaced\s+by", re.IGNORECASE),
-            re.compile(r"([A-Za-z0-9_\-]+)\s+was\s+replaced\s+by", re.IGNORECASE),
-            re.compile(r"([A-Za-z0-9_\-]+)\s+replaced\s+by", re.IGNORECASE),
-            re.compile(r"([A-Za-z0-9_\-]+)\s+is\s+deprecated\s+in\s+favor\s+of", re.IGNORECASE),
-            re.compile(r"([A-Za-z0-9_\-]+)\s+was\s+deprecated\s+in\s+favor\s+of", re.IGNORECASE),
-            re.compile(r"([A-Za-z0-9_\-]+)\s+deprecated\s+in\s+favor\s+of", re.IGNORECASE)
+            re.compile(r"([A-Za-z0-9_\-\.]+)\s+(?:is\s+|was\s+|are\s+|were\s+)?replaced\s+by\s+([A-Za-z0-9_\-\.]+)", re.IGNORECASE),
+            re.compile(r"([A-Za-z0-9_\-\.]+)\s+(?:is\s+|was\s+|are\s+|were\s+)?deprecated\s+in\s+favor\s+of\s+([A-Za-z0-9_\-\.]+)", re.IGNORECASE)
         ]
 
         # Active voice: [New] instead of/replaces/supersedes [Replaced]
         active_patterns = [
-            re.compile(r"instead\s+of\s+([A-Za-z0-9_\-]+)", re.IGNORECASE),
-            re.compile(r"replaces\s+([A-Za-z0-9_\-]+)", re.IGNORECASE),
-            re.compile(r"supersedes\s+([A-Za-z0-9_\-]+)", re.IGNORECASE)
+            re.compile(r"([A-Za-z0-9_\-\.]+)\s+instead\s+of\s+([A-Za-z0-9_\-\.]+)", re.IGNORECASE),
+            re.compile(r"([A-Za-z0-9_\-\.]+)\s+replaces\s+([A-Za-z0-9_\-\.]+)", re.IGNORECASE),
+            re.compile(r"([A-Za-z0-9_\-\.]+)\s+supersedes\s+([A-Za-z0-9_\-\.]+)", re.IGNORECASE)
         ]
 
-        for pat in passive_patterns + active_patterns:
+        for pat in passive_patterns:
             for match in pat.finditer(content):
-                replaced_tokens.add(ClaimNormalizer.normalize_token(match.group(1)))
+                old_t = ClaimNormalizer.normalize_token(match.group(1))
+                new_t = ClaimNormalizer.normalize_token(match.group(2))
+                replaced_tokens.add(old_t)
+                new_to_old[new_t] = old_t
+
+        for pat in active_patterns:
+            for match in pat.finditer(content):
+                new_t = ClaimNormalizer.normalize_token(match.group(1))
+                old_t = ClaimNormalizer.normalize_token(match.group(2))
+                replaced_tokens.add(old_t)
+                new_to_old[new_t] = old_t
 
         for pat in self.TECH_PATTERNS:
             for match in pat.finditer(content):
@@ -493,6 +502,11 @@ class MemoryExtractor:
                         pred = "uses_database"
                     else:
                         pred = "uses_technology"
+
+                    details = {"technology": raw_tech}
+                    if tech_name in new_to_old:
+                        details["replaces"] = new_to_old[tech_name]
+
                     candidates.append(ExtractedCandidate(
                         memory_type="technology",
                         statement=f"Uses technology: {raw_tech}",
@@ -505,7 +519,7 @@ class MemoryExtractor:
                             "scope": {"component": "core"},
                             "temporal_context": "current"
                         },
-                        details={"technology": raw_tech}
+                        details=details
                     ))
 
         # Mark low confidence items as review_required

@@ -151,27 +151,39 @@ def test_heuristic_replacement_direction():
     # 1. Active voice
     cands = heuristic.extract_from_message("user", "Let's use SQLite instead of PostgreSQL for dev.")
     techs = [c for c in cands if c.memory_type == "technology"]
-    objects = [c.structured_claim.get("object") for c in techs if c.structured_claim]
-    assert "sqlite" in objects
-    assert "postgresql" not in objects
+    sqlite_cand = next((c for c in techs if c.structured_claim.get("object") == "sqlite"), None)
+    assert sqlite_cand is not None
+    assert sqlite_cand.details.get("replaces") == "postgresql"
+    assert "postgresql" not in [c.structured_claim.get("object") for c in techs if c.structured_claim]
 
     # 2. Active voice replaces
     cands = heuristic.extract_from_message("user", "SQLite replaces PostgreSQL")
     techs = [c for c in cands if c.memory_type == "technology"]
-    objects = [c.structured_claim.get("object") for c in techs if c.structured_claim]
-    assert "sqlite" in objects
-    assert "postgresql" not in objects
+    sqlite_cand = next((c for c in techs if c.structured_claim.get("object") == "sqlite"), None)
+    assert sqlite_cand is not None
+    assert sqlite_cand.details.get("replaces") == "postgresql"
+    assert "postgresql" not in [c.structured_claim.get("object") for c in techs if c.structured_claim]
 
     # 3. Passive voice replaced by
     cands = heuristic.extract_from_message("user", "PostgreSQL is replaced by SQLite")
     techs = [c for c in cands if c.memory_type == "technology"]
-    objects = [c.structured_claim.get("object") for c in techs if c.structured_claim]
-    assert "sqlite" in objects
-    assert "postgresql" not in objects
+    sqlite_cand = next((c for c in techs if c.structured_claim.get("object") == "sqlite"), None)
+    assert sqlite_cand is not None
+    assert sqlite_cand.details.get("replaces") == "postgresql"
+    assert "postgresql" not in [c.structured_claim.get("object") for c in techs if c.structured_claim]
 
     # 4. Passive voice deprecated in favor of
     cands = heuristic.extract_from_message("user", "PostgreSQL deprecated in favor of SQLite")
     techs = [c for c in cands if c.memory_type == "technology"]
-    objects = [c.structured_claim.get("object") for c in techs if c.structured_claim]
-    assert "sqlite" in objects
-    assert "postgresql" not in objects
+    sqlite_cand = next((c for c in techs if c.structured_claim.get("object") == "sqlite"), None)
+    assert sqlite_cand is not None
+    assert sqlite_cand.details.get("replaces") == "postgresql"
+    assert "postgresql" not in [c.structured_claim.get("object") for c in techs if c.structured_claim]
+
+    # 5. Dotted technology names
+    cands = heuristic.extract_from_message("user", "Next.js replaced by React")
+    techs = [c for c in cands if c.memory_type == "technology"]
+    react_cand = next((c for c in techs if c.structured_claim.get("object") == "react"), None)
+    assert react_cand is not None
+    assert react_cand.details.get("replaces") == "next.js"
+    assert "next.js" not in [c.structured_claim.get("object") for c in techs if c.structured_claim]
