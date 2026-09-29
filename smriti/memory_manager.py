@@ -74,7 +74,7 @@ class MemoryManager:
 
             claim1 = ClaimNormalizer.normalize_claim(m1.structured_claim)
             for m2 in memories[i+1:]:
-                if m1.project_id and m2.project_id and m1.project_id != m2.project_id:
+                if m1.project_id != m2.project_id:
                     continue
                 if not m2.structured_claim:
                     continue

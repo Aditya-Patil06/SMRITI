@@ -59,6 +59,7 @@ class CanonicalExportEngine:
                 set(f"user:{u.id}" for u in users) |
                 set(f"workspace:{w.id}" for w in workspaces) |
                 active_ws_ids | active_proj_ids | mem_ids |
+                set(t.id for t in tasks) |
                 set(m.id for m in milestones) |
                 set(c.id for c in conversations) |
                 set(msg.id for msg in messages) |

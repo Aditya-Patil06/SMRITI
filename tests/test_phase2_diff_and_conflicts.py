@@ -477,45 +477,7 @@ def test_word_boundary_matching_for_supersession(db_session):
     assert res_sql.change_type == "SUPERSEDED"
     assert res_sql.existing_memory_id == "mem-sql-server"
 
-def test_cross_project_false_conflicts(db_session):
-    manager = MemoryManager()
 
-    m1 = Memory(
-        id="mem-proj-a",
-        workspace_id="ws-1",
-        project_id="proj-A",
-        memory_type="decision",
-        statement="Use PostgreSQL",
-        status="active",
-        structured_claim={"subject": "project", "predicate": "uses_database", "object": "postgresql"}
-    )
-    m2 = Memory(
-        id="mem-proj-b",
-        workspace_id="ws-1",
-        project_id="proj-B",
-        memory_type="decision",
-        statement="Use MongoDB",
-        status="active",
-        structured_claim={"subject": "project", "predicate": "uses_database", "object": "mongodb"}
-    )
-    m3 = Memory(
-        id="mem-proj-a2",
-        workspace_id="ws-1",
-        project_id="proj-A",
-        memory_type="decision",
-        statement="Use SQLite",
-        status="active",
-        structured_claim={"subject": "project", "predicate": "uses_database", "object": "sqlite"}
-    )
-    db_session.add_all([m1, m2, m3])
-    db_session.commit()
-
-    conflicts = manager.get_conflicts(db_session, "ws-1")
-    # Only A vs A2 should conflict. A vs B should not.
-    assert len(conflicts) == 1
-    c = conflicts[0]
-    involved = {c["memory_a"]["id"], c["memory_b"]["id"]}
-    assert involved == {"mem-proj-a", "mem-proj-a2"}
 
 def test_explicitly_distinct_scopes_prevent_supersession(db_session):
     diff_engine = MemoryDiffEngine()
@@ -573,3 +535,52 @@ def test_cross_workspace_idor_in_conflict_resolution(db_session):
     manager.resolve_conflict(db_session, memory_id="mem-ws1", resolution_action="keep_active")
     db_session.refresh(m_ws1)
     assert m_ws1.status == "active"
+
+def test_cross_project_false_conflicts(db_session):
+    manager = MemoryManager()
+
+    m_a1 = Memory(
+        id="mem-proj-a1", workspace_id="ws-1", project_id="proj-A",
+        memory_type="decision", statement="Use PostgreSQL", status="active",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "postgresql"}
+    )
+    m_a2 = Memory(
+        id="mem-proj-a2", workspace_id="ws-1", project_id="proj-A",
+        memory_type="decision", statement="Use SQLite", status="active",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "sqlite"}
+    )
+    m_b = Memory(
+        id="mem-proj-b", workspace_id="ws-1", project_id="proj-B",
+        memory_type="decision", statement="Use MongoDB", status="active",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "mongodb"}
+    )
+    m_none1 = Memory(
+        id="mem-proj-none1", workspace_id="ws-1", project_id=None,
+        memory_type="decision", statement="Use Redis", status="active",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "redis"}
+    )
+    m_none2 = Memory(
+        id="mem-proj-none2", workspace_id="ws-1", project_id=None,
+        memory_type="decision", statement="Use Memcached", status="active",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "memcached"}
+    )
+
+    db_session.add_all([m_a1, m_a2, m_b, m_none1, m_none2])
+    db_session.commit()
+
+    conflicts = manager.get_conflicts(db_session, "ws-1")
+
+    # We expect conflicts between exactly the same projects.
+    # 1. m_a1 vs m_a2 (project-A vs project-A)
+    # 2. m_none1 vs m_none2 (None vs None)
+    # Total conflicts expected: 2
+
+    assert len(conflicts) == 2
+
+    conflict_pairs = [
+        {c["memory_a"]["id"], c["memory_b"]["id"]}
+        for c in conflicts
+    ]
+
+    assert {"mem-proj-a1", "mem-proj-a2"} in conflict_pairs
+    assert {"mem-proj-none1", "mem-proj-none2"} in conflict_pairs

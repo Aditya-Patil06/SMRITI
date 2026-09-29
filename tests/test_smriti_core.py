@@ -329,7 +329,7 @@ def test_canonical_import_legacy_bundle_default_user(db_session):
 
 def test_canonical_export_preserves_provenance_graph_edges(db_session):
     from smriti.canonical_export import CanonicalExportEngine
-    from smriti.models import Workspace, Project, Memory, Conversation, Message, RelationshipEdge, ProviderAccount, Milestone
+    from smriti.models import Workspace, Project, Memory, Conversation, Message, RelationshipEdge, ProviderAccount, Milestone, Task
 
     ws = Workspace(id='ws-export-test', name='Export WS', user_id='user-1')
     db_session.add(ws)
@@ -341,15 +341,17 @@ def test_canonical_export_preserves_provenance_graph_edges(db_session):
     c_conv = Conversation(id='conv-export', provider_account_id=pa.id, title='T')
     msg = Message(id='msg-export', conversation_id=c_conv.id, content='C', role='user')
     ms = Milestone(id='ms-export', project_id=p.id, title='T', milestone_type='project_created')
+    t = Task(id='task-export', project_id=p.id, title='T')
 
-    db_session.add_all([pa, p, m, c_conv, msg, ms])
+    db_session.add_all([pa, p, m, c_conv, msg, ms, t])
     db_session.commit()
 
     edges_to_create = [
         ('conversation', c_conv.id, 'project', p.id),
         ('message', msg.id, 'memory', m.id),
         ('provider_account', pa.id, 'conversation', c_conv.id),
-        ('milestone', ms.id, 'project', p.id)
+        ('milestone', ms.id, 'project', p.id),
+        ('task', t.id, 'memory', m.id)
     ]
 
     for src_type, src_id, tgt_type, tgt_id in edges_to_create:
