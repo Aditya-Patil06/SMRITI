@@ -586,6 +586,24 @@ def import_conversations(
                                     mems_to_supersede = []
                                     for act_mem in all_active:
                                         if act_mem.structured_claim and act_mem.structured_claim.get("subject") == subject and act_mem.structured_claim.get("predicate") == predicate and act_mem.structured_claim.get("object") == obj:
+                                            if mem.project_id and act_mem.project_id and mem.project_id != act_mem.project_id:
+                                                continue
+
+                                            mem_scope = mem.structured_claim.get("scope") or {} if mem.structured_claim else {}
+                                            act_scope = act_mem.structured_claim.get("scope") or {}
+
+                                            # Helper to check scope distinction inline
+                                            scopes_distinct = False
+                                            for k in set(mem_scope.keys()).union(set(act_scope.keys())):
+                                                v1 = mem_scope.get(k)
+                                                v2 = act_scope.get(k)
+                                                if v1 and v2 and v1 != v2:
+                                                    scopes_distinct = True
+                                                    break
+
+                                            if scopes_distinct:
+                                                continue
+
                                             mems_to_supersede.append(act_mem)
 
                                     for t_mem in mems_to_supersede:

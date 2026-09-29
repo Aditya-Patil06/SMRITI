@@ -94,6 +94,11 @@ class ProjectIntelligenceService:
                 sorted_constraints = sorted(list(derived_constraints))
                 proj.constraints = sorted_constraints
                 changes["constraints"] = sorted_constraints
+
+            if architecture_points and not proj.architecture_overview:
+                overview = "; ".join(architecture_points[:5])
+                proj.architecture_overview = overview
+                changes["architecture_overview"] = overview
         else:
             # Rebuild derived fields completely, discarding stale values
             if derived_goal and derived_goal != proj.goal:
@@ -110,10 +115,11 @@ class ProjectIntelligenceService:
                 proj.constraints = sorted_constraints
                 changes["constraints"] = sorted_constraints
 
-        if architecture_points and not proj.architecture_overview:
-            overview = "; ".join(architecture_points[:5])
-            proj.architecture_overview = overview
-            changes["architecture_overview"] = overview
+            # Refresh stale architecture overview for unconfirmed projects
+            overview = "; ".join(architecture_points[:5]) if architecture_points else None
+            if proj.architecture_overview != overview:
+                proj.architecture_overview = overview
+                changes["architecture_overview"] = overview
 
         if changes:
             proj.updated_at = now

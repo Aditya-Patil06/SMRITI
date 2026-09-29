@@ -68,6 +68,11 @@ class MemoryDiffEngine:
         old_subj = old_claim.get("subject")
         old_pred = old_claim.get("predicate")
 
+        cand_scope = cand_claim.get("scope") or {} if cand_claim else {}
+        old_scope = old_claim.get("scope") or {}
+        if self._are_scopes_distinct(cand_scope, old_scope):
+            return None
+
         # 1. Explicit replacement field
         if cand_replaces_norm and cand_replaces_norm == old_obj:
             if not cand_claim or (
@@ -216,6 +221,15 @@ class MemoryDiffEngine:
             review_required=True,
             evidence={"claim_a": old_claim, "claim_b": cand_claim}
         )
+
+
+    def _are_scopes_distinct(self, scope_a: dict, scope_b: dict) -> bool:
+        for k in set(scope_a.keys()).union(set(scope_b.keys())):
+            v1 = scope_a.get(k)
+            v2 = scope_b.get(k)
+            if v1 and v2 and v1 != v2:
+                return True
+        return False
 
     def classify_diff(
         self,

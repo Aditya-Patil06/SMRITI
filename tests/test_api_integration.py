@@ -567,3 +567,62 @@ def test_structured_claim_schema_validation(client, test_db_session):
     assert invalid_res.status_code == 422
 
 
+
+def test_cross_project_and_cross_scope_active_supersession(client, test_db_session):
+    from smriti.models import Project, Memory
+
+    # 1. Project A and Project B
+    p_a = Project(id="proj-a-super", workspace_id="ws-1", name="Proj A")
+    p_b = Project(id="proj-b-super", workspace_id="ws-1", name="Proj B")
+    test_db_session.add_all([p_a, p_b])
+
+    # 2. Existing memory in Proj A
+    m_a = Memory(
+        id="mem-a-super",
+        workspace_id="ws-1",
+        project_id="proj-a-super",
+        memory_type="technology",
+        statement="Uses technology: postgresql",
+        status="active",
+        structured_claim={"subject": "project", "predicate": "uses_technology", "object": "postgresql"}
+    )
+    # 3. Existing memory with specific scope in Proj B
+    m_scope = Memory(
+        id="mem-scope-super",
+        workspace_id="ws-1",
+        project_id="proj-b-super",
+        memory_type="technology",
+        statement="Uses technology: postgresql",
+        status="active",
+        structured_claim={"subject": "project", "predicate": "uses_technology", "object": "postgresql", "scope": {"env": "dev"}}
+    )
+    test_db_session.add_all([m_a, m_scope])
+    test_db_session.commit()
+
+    payload = [{
+        "id": "conv-super-1",
+        "title": "DB Switch",
+        "create_time": 1710000000,
+        "mapping": {"create": [{"message_id": "msg-1"}]},
+        "messages": [
+            {"id": "msg-1", "create_time": 1710000000, "author": "user", "content": "sqlite replaces postgresql"}
+        ]
+    }]
+
+    # Import into Proj B!
+    res = client.post("/api/v1/conversations/import", json={
+        "workspace_id": "ws-1",
+        "project_id": "proj-b-super",
+        "provider_account_id": "test_account",
+        "conversations": payload
+    })
+
+    # It should extract sqlite replacing postgresql.
+    # It should NOT supersede m_a because of different project.
+    # It should NOT supersede m_scope because the extracted candidate has no scope, which is distinct from {"env": "dev"}
+    test_db_session.refresh(m_a)
+    test_db_session.refresh(m_scope)
+
+    assert m_a.status == "active"
+    assert m_scope.status == "active"
+

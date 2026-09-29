@@ -303,3 +303,79 @@ def test_synthesis_preserves_confirmed_and_rebuilds_derived(db_session):
     assert "fresh-tech" in proj_unconf.tech_stack
     assert "stale-tech" not in proj_unconf.tech_stack
 
+
+def test_unconfirmed_architecture_overview_refresh(db_session):
+    engine = ProjectIntelligenceService()
+
+    # 1. create unconfirmed project with existing architecture overview
+    proj = Project(
+        id="proj-arch-test", name="Proj 1",
+        workspace_id="ws-1",
+        architecture_overview="Initial architecture"
+    )
+    db_session.add(proj)
+    db_session.commit()
+
+    # 2. derive new architecture-relevant decision
+    m = Memory(
+        id="mem-arch",
+        workspace_id="ws-1",
+        project_id="proj-arch-test",
+        memory_type="decision",
+        statement="Build using Microservices",
+        status="active"
+    )
+    db_session.add(m)
+    db_session.commit()
+
+    # 3. synthesize
+    engine.synthesize_project_state(db_session, "proj-arch-test")
+
+    # 4. verify
+    db_session.refresh(proj)
+    assert proj.architecture_overview == "Build using Microservices"
+
+def test_confirmed_architecture_overview_preservation(db_session):
+    from datetime import datetime, timezone
+    engine = ProjectIntelligenceService()
+
+    proj = Project(
+        id="proj-arch-conf", name="Proj 2",
+        workspace_id="ws-1",
+        architecture_overview="Confirmed architecture",
+        last_confirmed_at=datetime.now(timezone.utc)
+    )
+    db_session.add(proj)
+
+    m = Memory(
+        id="mem-arch-2",
+        workspace_id="ws-1",
+        project_id="proj-arch-conf",
+        memory_type="decision",
+        statement="Build using Monolith",
+        status="active"
+    )
+    db_session.add(m)
+    db_session.commit()
+
+    engine.synthesize_project_state(db_session, "proj-arch-conf")
+
+    db_session.refresh(proj)
+    assert proj.architecture_overview == "Confirmed architecture"
+
+
+def test_unconfirmed_architecture_overview_cleared(db_session):
+    engine = ProjectIntelligenceService()
+
+    proj = Project(
+        id='proj-arch-clear', name='Proj 3',
+        workspace_id='ws-1',
+        architecture_overview='Stale architecture'
+    )
+    db_session.add(proj)
+    db_session.commit()
+
+    engine.synthesize_project_state(db_session, 'proj-arch-clear')
+
+    db_session.refresh(proj)
+    assert proj.architecture_overview is None

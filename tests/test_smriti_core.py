@@ -326,3 +326,48 @@ def test_canonical_import_legacy_bundle_default_user(db_session):
     default_user = db_session.query(User).filter(User.id == CanonicalExportEngine.DEFAULT_USER_ID).first()
     assert default_user is not None
 
+
+def test_canonical_export_preserves_provenance_graph_edges(db_session):
+    from smriti.canonical_export import CanonicalExportEngine
+    from smriti.models import Workspace, Project, Memory, Conversation, Message, RelationshipEdge, ProviderAccount, Milestone
+
+    ws = Workspace(id='ws-export-test', name='Export WS', user_id='user-1')
+    db_session.add(ws)
+    db_session.commit()
+
+    pa = ProviderAccount(id='pa-export', user_id='user-1', provider='generic', account_label='test')
+    p = Project(id='proj-export', workspace_id=ws.id, name='Proj')
+    m = Memory(id='mem-export', workspace_id=ws.id, memory_type='decision', statement='stmt')
+    c_conv = Conversation(id='conv-export', provider_account_id=pa.id, title='T')
+    msg = Message(id='msg-export', conversation_id=c_conv.id, content='C', role='user')
+    ms = Milestone(id='ms-export', project_id=p.id, title='T', milestone_type='project_created')
+
+    db_session.add_all([pa, p, m, c_conv, msg, ms])
+    db_session.commit()
+
+    edges_to_create = [
+        ('conversation', c_conv.id, 'project', p.id),
+        ('message', msg.id, 'memory', m.id),
+        ('provider_account', pa.id, 'conversation', c_conv.id),
+        ('milestone', ms.id, 'project', p.id)
+    ]
+
+    for src_type, src_id, tgt_type, tgt_id in edges_to_create:
+        e = RelationshipEdge(
+            source_type=src_type, source_id=src_id,
+            relation='LINKED_TO',
+            target_type=tgt_type, target_id=tgt_id
+        )
+        db_session.add(e)
+    db_session.commit()
+
+    engine = CanonicalExportEngine()
+    bundle = engine.export_all(db_session, ws.id)
+
+    edges = bundle['relationships']
+
+    for src_type, src_id, tgt_type, tgt_id in edges_to_create:
+        assert any(
+            edg['source_id'] == src_id and edg['target_id'] == tgt_id
+            for edg in edges
+        ), f"Missing edge {src_type} -> {tgt_type}"

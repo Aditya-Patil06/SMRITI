@@ -476,3 +476,100 @@ def test_word_boundary_matching_for_supersession(db_session):
     res_sql = diff_engine.classify_diff(cand_sql_server, existing, "ws-1")
     assert res_sql.change_type == "SUPERSEDED"
     assert res_sql.existing_memory_id == "mem-sql-server"
+
+def test_cross_project_false_conflicts(db_session):
+    manager = MemoryManager()
+
+    m1 = Memory(
+        id="mem-proj-a",
+        workspace_id="ws-1",
+        project_id="proj-A",
+        memory_type="decision",
+        statement="Use PostgreSQL",
+        status="active",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "postgresql"}
+    )
+    m2 = Memory(
+        id="mem-proj-b",
+        workspace_id="ws-1",
+        project_id="proj-B",
+        memory_type="decision",
+        statement="Use MongoDB",
+        status="active",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "mongodb"}
+    )
+    m3 = Memory(
+        id="mem-proj-a2",
+        workspace_id="ws-1",
+        project_id="proj-A",
+        memory_type="decision",
+        statement="Use SQLite",
+        status="active",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "sqlite"}
+    )
+    db_session.add_all([m1, m2, m3])
+    db_session.commit()
+
+    conflicts = manager.get_conflicts(db_session, "ws-1")
+    # Only A vs A2 should conflict. A vs B should not.
+    assert len(conflicts) == 1
+    c = conflicts[0]
+    involved = {c["memory_a"]["id"], c["memory_b"]["id"]}
+    assert involved == {"mem-proj-a", "mem-proj-a2"}
+
+def test_explicitly_distinct_scopes_prevent_supersession(db_session):
+    diff_engine = MemoryDiffEngine()
+
+    existing = [
+        Memory(
+            id="mem-backend",
+            workspace_id="ws-1",
+            memory_type="technology",
+            statement="Uses postgresql",
+            status="active",
+            structured_claim={"subject": "project", "predicate": "uses_database", "object": "postgresql", "scope": {"component": "backend"}}
+        )
+    ]
+
+    cand_same_scope = ExtractedCandidate(
+        memory_type="technology",
+        statement="Uses sqlite instead of postgresql",
+        confidence=0.9,
+        status="active",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "sqlite", "scope": {"component": "backend"}},
+        details={"replaces": "postgresql"}
+    )
+    res_same = diff_engine.classify_diff(cand_same_scope, existing, "ws-1")
+    assert res_same.change_type == "SUPERSEDED"
+
+    cand_diff_scope = ExtractedCandidate(
+        memory_type="technology",
+        statement="Uses sqlite instead of postgresql",
+        confidence=0.9,
+        status="active",
+        structured_claim={"subject": "project", "predicate": "uses_database", "object": "sqlite", "scope": {"component": "frontend"}},
+        details={"replaces": "postgresql"}
+    )
+    res_diff = diff_engine.classify_diff(cand_diff_scope, existing, "ws-1")
+    assert res_diff.change_type != "SUPERSEDED"
+
+def test_cross_workspace_idor_in_conflict_resolution(db_session):
+    manager = MemoryManager()
+
+    m_ws1 = Memory(id="mem-ws1", workspace_id="ws-1", status="review_required", memory_type="decision", statement="s1")
+    m_ws2 = Memory(id="mem-ws2", workspace_id="ws-2", status="review_required", memory_type="decision", statement="s2")
+    db_session.add_all([m_ws1, m_ws2])
+    db_session.commit()
+
+    # Resolving ws1 memory but passing ws2 memory as paired_memory_id should fail
+    import pytest
+    with pytest.raises(ValueError, match="Cross-workspace"):
+        manager.resolve_conflict(db_session, memory_id="mem-ws1", resolution_action="keep_both", paired_memory_id="mem-ws2")
+
+    with pytest.raises(ValueError, match="Cross-workspace"):
+        manager.resolve_conflict(db_session, memory_id="mem-ws1", resolution_action="supersede", superseded_by_id="mem-ws2")
+
+    # Valid resolution succeeds
+    manager.resolve_conflict(db_session, memory_id="mem-ws1", resolution_action="keep_active")
+    db_session.refresh(m_ws1)
+    assert m_ws1.status == "active"

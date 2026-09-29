@@ -52,7 +52,18 @@ class CanonicalExportEngine:
                 set(f"project:{p.id}" for p in projects) |
                 set(f"memory:{m.id}" for m in memories) |
                 set(f"task:{t.id}" for t in tasks) |
-                active_ws_ids | active_proj_ids | mem_ids
+                set(f"milestone:{m.id}" for m in milestones) |
+                set(f"conversation:{c.id}" for c in conversations) |
+                set(f"message:{msg.id}" for msg in messages) |
+                set(f"provider_account:{pa.id}" for pa in provider_accounts) |
+                set(f"user:{u.id}" for u in users) |
+                set(f"workspace:{w.id}" for w in workspaces) |
+                active_ws_ids | active_proj_ids | mem_ids |
+                set(m.id for m in milestones) |
+                set(c.id for c in conversations) |
+                set(msg.id for msg in messages) |
+                set(pa.id for pa in provider_accounts) |
+                set(u.id for u in users)
             )
             all_edges = db.query(RelationshipEdge).all()
             edges = [

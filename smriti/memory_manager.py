@@ -74,6 +74,8 @@ class MemoryManager:
 
             claim1 = ClaimNormalizer.normalize_claim(m1.structured_claim)
             for m2 in memories[i+1:]:
+                if m1.project_id and m2.project_id and m1.project_id != m2.project_id:
+                    continue
                 if not m2.structured_claim:
                     continue
                 claim2 = ClaimNormalizer.normalize_claim(m2.structured_claim)
@@ -173,6 +175,16 @@ class MemoryManager:
         mem = db.query(Memory).filter(Memory.id == memory_id).first()
         if not mem:
             raise ValueError(f"Memory with ID {memory_id} not found")
+
+        current_workspace_id = mem.workspace_id
+        if paired_memory_id:
+            p_mem = db.query(Memory).filter(Memory.id == paired_memory_id).first()
+            if p_mem and p_mem.workspace_id != current_workspace_id:
+                raise ValueError(f"Cross-workspace memory reference rejected for paired_memory_id {paired_memory_id}")
+        if superseded_by_id:
+            s_mem = db.query(Memory).filter(Memory.id == superseded_by_id).first()
+            if s_mem and s_mem.workspace_id != current_workspace_id:
+                raise ValueError(f"Cross-workspace memory reference rejected for superseded_by_id {superseded_by_id}")
 
         old_status = mem.status
         now = datetime.now(timezone.utc)
