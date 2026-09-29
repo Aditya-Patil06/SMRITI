@@ -586,7 +586,7 @@ def import_conversations(
                                     mems_to_supersede = []
                                     for act_mem in all_active:
                                         if act_mem.structured_claim and act_mem.structured_claim.get("subject") == subject and act_mem.structured_claim.get("predicate") == predicate and act_mem.structured_claim.get("object") == obj:
-                                            if mem.project_id and act_mem.project_id and mem.project_id != act_mem.project_id:
+                                            if mem.project_id != act_mem.project_id:
                                                 continue
 
                                             mem_scope = mem.structured_claim.get("scope") or {} if mem.structured_claim else {}

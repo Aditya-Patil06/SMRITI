@@ -566,15 +566,22 @@ def test_structured_claim_schema_validation(client, test_db_session):
     })
     assert invalid_res.status_code == 422
 
-
-
 def test_cross_project_and_cross_scope_active_supersession(client, test_db_session):
-    from smriti.models import Project, Memory
+    from smriti.models import Project, Memory, ProviderAccount
 
     # 1. Project A and Project B
     p_a = Project(id="proj-a-super", workspace_id="ws-1", name="Proj A")
     p_b = Project(id="proj-b-super", workspace_id="ws-1", name="Proj B")
-    test_db_session.add_all([p_a, p_b])
+
+    # Provider Account
+    pa = ProviderAccount(
+        id="test_account",
+        user_id="user-1",
+        provider="chatgpt",
+        account_label="Test",
+    )
+
+    test_db_session.add_all([p_a, p_b, pa])
 
     # 2. Existing memory in Proj A
     m_a = Memory(
@@ -603,21 +610,41 @@ def test_cross_project_and_cross_scope_active_supersession(client, test_db_sessi
         "id": "conv-super-1",
         "title": "DB Switch",
         "create_time": 1710000000,
-        "mapping": {"create": [{"message_id": "msg-1"}]},
-        "messages": [
-            {"id": "msg-1", "create_time": 1710000000, "author": "user", "content": "sqlite replaces postgresql"}
-        ]
+        "mapping": {
+            "node-1": {
+                "message": {
+                    "author": {"role": "user"},
+                    "create_time": 1710000000,
+                    "content": {"parts": ["sqlite replaces postgresql"]}
+                }
+            }
+        }
     }]
 
     # Import into Proj B!
-    res = client.post("/api/v1/conversations/import", json={
-        "workspace_id": "ws-1",
-        "project_id": "proj-b-super",
-        "provider_account_id": "test_account",
-        "conversations": payload
-    })
+    res = client.post(
+        "/api/v1/imports/conversations?provider=chatgpt&workspace_id=ws-1&project_id=proj-b-super&provider_account_id=test_account",
+        json=payload
+    )
 
-    # It should extract sqlite replacing postgresql.
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "success"
+    assert data["imported_conversations"] == 1
+    assert data["extracted_memories"] >= 1
+
+    # Check extracted memory
+    extracted = test_db_session.query(Memory).filter(
+        Memory.project_id == "proj-b-super",
+        Memory.status == "active"
+    ).all()
+
+    has_sqlite = any(
+        m.structured_claim and m.structured_claim.get("object") == "sqlite"
+        for m in extracted
+    )
+    assert has_sqlite, "SQLite structured claim was not extracted"
+
     # It should NOT supersede m_a because of different project.
     # It should NOT supersede m_scope because the extracted candidate has no scope, which is distinct from {"env": "dev"}
     test_db_session.refresh(m_a)
@@ -626,3 +653,75 @@ def test_cross_project_and_cross_scope_active_supersession(client, test_db_sessi
     assert m_a.status == "active"
     assert m_scope.status == "active"
 
+def test_supersession_exact_project_equality(client, test_db_session):
+    from smriti.models import Project, Memory, ProviderAccount
+
+    # Provider Account
+    pa = ProviderAccount(
+        id="test_account_eq",
+        user_id="user-1",
+        provider="chatgpt",
+        account_label="Test",
+    )
+
+    p_a = Project(id="proj-a-eq", workspace_id="ws-1", name="Proj A")
+    p_b = Project(id="proj-b-eq", workspace_id="ws-1", name="Proj B")
+
+    test_db_session.add_all([pa, p_a, p_b])
+
+    # Base memory
+    base_claim = {"subject": "project", "predicate": "uses_database", "object": "postgresql"}
+
+    m_a = Memory(id="mem-a", workspace_id="ws-1", project_id="proj-a-eq", memory_type="technology", statement="Uses technology: PostgreSQL", status="active", structured_claim=base_claim)
+    m_b = Memory(id="mem-b", workspace_id="ws-1", project_id="proj-b-eq", memory_type="technology", statement="Uses technology: PostgreSQL", status="active", structured_claim=base_claim)
+    m_none = Memory(id="mem-none", workspace_id="ws-1", project_id=None, memory_type="technology", statement="Uses technology: PostgreSQL", status="active", structured_claim=base_claim)
+
+    test_db_session.add_all([m_a, m_b, m_none])
+    test_db_session.commit()
+
+    # We will import conversations with claims that "replace PostgreSQL" to different targets.
+
+    def import_for_target(project_id, target_tech):
+        payload = [{
+            "id": f"conv-{target_tech}",
+            "title": "DB Switch",
+            "create_time": 1710000000,
+            "mapping": {
+                "node-1": {
+                    "message": {
+                        "author": {"role": "user"},
+                        "create_time": 1710000000,
+                        "content": {"parts": [f"{target_tech} replaces PostgreSQL"]}
+                    }
+                }
+            }
+        }]
+        url = f"/api/v1/imports/conversations?provider=chatgpt&workspace_id=ws-1&provider_account_id=test_account_eq"
+        if project_id:
+            url += f"&project_id={project_id}"
+        return client.post(url, json=payload)
+
+    # 1. Target proj-a-eq
+    res_a = import_for_target("proj-a-eq", "SQLite")
+    assert res_a.status_code == 200
+
+    # m_a (same project) should be superseded.
+    # m_b (different project) should remain active.
+    # m_none (projectless vs named) should remain active.
+    test_db_session.refresh(m_a)
+    test_db_session.refresh(m_b)
+    test_db_session.refresh(m_none)
+    assert m_a.status == "superseded"
+    assert m_b.status == "active"
+    assert m_none.status == "active"
+
+    # 2. Target None (Projectless)
+    res_none = import_for_target(None, "MongoDB")
+    assert res_none.status_code == 200
+
+    # m_b (named vs projectless) should remain active.
+    # m_none (projectless vs projectless) should be superseded.
+    test_db_session.refresh(m_b)
+    test_db_session.refresh(m_none)
+    assert m_b.status == "active"
+    assert m_none.status == "superseded"

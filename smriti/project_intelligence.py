@@ -116,10 +116,30 @@ class ProjectIntelligenceService:
                 changes["constraints"] = sorted_constraints
 
             # Refresh stale architecture overview for unconfirmed projects
-            overview = "; ".join(architecture_points[:5]) if architecture_points else None
-            if proj.architecture_overview != overview:
-                proj.architecture_overview = overview
-                changes["architecture_overview"] = overview
+            if architecture_points:
+                overview = "; ".join(architecture_points[:5])
+                if proj.architecture_overview != overview:
+                    proj.architecture_overview = overview
+                    changes["architecture_overview"] = overview
+            elif proj.architecture_overview:
+                # No active architecture points.
+                # Do NOT erase a non-empty imported/user-provided architecture_overview.
+                # Only erase it if it is genuinely derived. A genuinely derived overview
+                # perfectly matches parts of historical decision memories.
+                historical_points = [
+                    m.statement.strip()
+                    for m in db.query(Memory).filter(
+                        Memory.project_id == project_id,
+                        Memory.memory_type == "decision",
+                        Memory.status.in_(["superseded", "forgotten", "deprecated", "conflicting"])
+                    ).all()
+                ]
+                parts = [p.strip() for p in proj.architecture_overview.split(";")]
+                is_derived = all(p in historical_points for p in parts) if historical_points and parts else False
+
+                if is_derived:
+                    proj.architecture_overview = None
+                    changes["architecture_overview"] = None
 
         if changes:
             proj.updated_at = now

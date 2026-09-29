@@ -363,16 +363,42 @@ def test_confirmed_architecture_overview_preservation(db_session):
     db_session.refresh(proj)
     assert proj.architecture_overview == "Confirmed architecture"
 
+def test_imported_architecture_overview_preserved(db_session):
+    engine = ProjectIntelligenceService()
+
+    proj = Project(
+        id='proj-arch-imported', name='Proj Imported',
+        workspace_id='ws-1',
+        architecture_overview='Imported architecture'
+    )
+    db_session.add(proj)
+    db_session.commit()
+
+    engine.synthesize_project_state(db_session, 'proj-arch-imported')
+
+    db_session.refresh(proj)
+    assert proj.architecture_overview == 'Imported architecture'
 
 def test_unconfirmed_architecture_overview_cleared(db_session):
     engine = ProjectIntelligenceService()
 
     proj = Project(
-        id='proj-arch-clear', name='Proj 3',
+        id='proj-arch-clear', name='Proj Derived',
         workspace_id='ws-1',
-        architecture_overview='Stale architecture'
+        architecture_overview='Derived architecture point'
     )
     db_session.add(proj)
+
+    # Simulate a genuinely derived architecture point that is now inactive (superseded/forgotten)
+    m = Memory(
+        id='mem-arch-stale',
+        workspace_id='ws-1',
+        project_id='proj-arch-clear',
+        memory_type='decision',
+        statement='Derived architecture point',
+        status='superseded'
+    )
+    db_session.add(m)
     db_session.commit()
 
     engine.synthesize_project_state(db_session, 'proj-arch-clear')
