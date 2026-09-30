@@ -130,8 +130,19 @@ class ProjectIntelligenceService:
                         Memory.status.in_(["superseded", "forgotten", "deprecated", "conflicting"])
                     ).all()
                 ]
-                parts = [p.strip() for p in proj.architecture_overview.split(";")]
-                is_derived = all(p in historical_points for p in parts) if historical_points and parts else False
+
+                def is_reconstructable(overview: str, pts: list) -> bool:
+                    if not overview:
+                        return True
+                    for p in pts:
+                        if overview == p:
+                            return True
+                        if overview.startswith(p + "; "):
+                            if is_reconstructable(overview[len(p) + 2:], pts):
+                                return True
+                    return False
+
+                is_derived = is_reconstructable(proj.architecture_overview.strip(), historical_points) if historical_points and proj.architecture_overview else False
 
                 if is_derived:
                     proj.architecture_overview = None

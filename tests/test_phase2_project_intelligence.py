@@ -405,3 +405,67 @@ def test_unconfirmed_architecture_overview_cleared(db_session):
 
     db_session.refresh(proj)
     assert proj.architecture_overview is None
+
+def test_unconfirmed_architecture_overview_with_semicolon_cleared(db_session):
+    engine = ProjectIntelligenceService()
+
+    stmt = "Use PostgreSQL; deploy locally"
+    proj = Project(
+        id='proj-arch-semi', name='Proj Semi',
+        workspace_id='ws-1',
+        architecture_overview=stmt
+    )
+    db_session.add(proj)
+
+    m = Memory(
+        id='mem-arch-semi',
+        workspace_id='ws-1',
+        project_id='proj-arch-semi',
+        memory_type='decision',
+        statement=stmt,
+        status='superseded'
+    )
+    db_session.add(m)
+    db_session.commit()
+
+    engine.synthesize_project_state(db_session, 'proj-arch-semi')
+
+    db_session.refresh(proj)
+    assert proj.architecture_overview is None
+
+def test_unconfirmed_architecture_overview_multiple_points_with_semicolons_cleared(db_session):
+    engine = ProjectIntelligenceService()
+
+    stmt1 = "Use PostgreSQL; deploy locally"
+    stmt2 = "Backend in Python; Frontend in React"
+
+    proj = Project(
+        id='proj-arch-semi-multi', name='Proj Semi Multi',
+        workspace_id='ws-1',
+        architecture_overview=f"{stmt1}; {stmt2}"
+    )
+    db_session.add(proj)
+
+    m1 = Memory(
+        id='mem-arch-semi-1',
+        workspace_id='ws-1',
+        project_id='proj-arch-semi-multi',
+        memory_type='decision',
+        statement=stmt1,
+        status='superseded'
+    )
+    m2 = Memory(
+        id='mem-arch-semi-2',
+        workspace_id='ws-1',
+        project_id='proj-arch-semi-multi',
+        memory_type='decision',
+        statement=stmt2,
+        status='superseded'
+    )
+    db_session.add_all([m1, m2])
+    db_session.commit()
+
+    engine.synthesize_project_state(db_session, 'proj-arch-semi-multi')
+
+    db_session.refresh(proj)
+    assert proj.architecture_overview is None
