@@ -8,6 +8,8 @@ from smriti.config import settings
 
 Base = declarative_base()
 
+PROJECT_FK = "projects.id"
+
 def utcnow():
     return datetime.now(timezone.utc)
 
@@ -91,16 +93,17 @@ class Project(Base):
     constraints = Column(JSON, default=list)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow)
-    last_confirmed_at = Column(DateTime, default=utcnow)
+    last_confirmed_at = Column(DateTime, nullable=True, default=None)
 
     workspace = relationship("Workspace", back_populates="projects")
     memories = relationship("Memory", back_populates="project")
     tasks = relationship("Task", back_populates="project", cascade="all, delete-orphan")
+    milestones = relationship("Milestone", back_populates="project", cascade="all, delete-orphan")
 
 class Task(Base):
     __tablename__ = "tasks"
     id = Column(String(64), primary_key=True, default=generate_uuid)
-    project_id = Column(String(64), ForeignKey("projects.id"), nullable=False)
+    project_id = Column(String(64), ForeignKey(PROJECT_FK), nullable=False)
     title = Column(String(512), nullable=False)
     description = Column(Text, nullable=True)
     status = Column(String(64), default="todo")  # todo, in_progress, completed, blocked
@@ -111,17 +114,32 @@ class Task(Base):
 
     project = relationship("Project", back_populates="tasks")
 
+class Milestone(Base):
+    __tablename__ = "milestones"
+    id = Column(String(64), primary_key=True, default=generate_uuid)
+    project_id = Column(String(64), ForeignKey(PROJECT_FK), nullable=False)
+    title = Column(String(256), nullable=False)
+    description = Column(Text, nullable=True)
+    milestone_type = Column(String(64), nullable=False)  # project_created, architecture_decided, technology_selected, feature_completed, phase_completed
+    evidence_memory_id = Column(String(64), ForeignKey("memories.id"), nullable=True)
+    reached_at = Column(DateTime, default=utcnow)
+    created_at = Column(DateTime, default=utcnow)
+
+    project = relationship("Project", back_populates="milestones")
+    evidence_memory = relationship("Memory")
+
 class Memory(Base):
     __tablename__ = "memories"
     id = Column(String(64), primary_key=True, default=generate_uuid)
     workspace_id = Column(String(64), ForeignKey("workspaces.id"), nullable=False)
-    project_id = Column(String(64), ForeignKey("projects.id"), nullable=True)
+    project_id = Column(String(64), ForeignKey(PROJECT_FK), nullable=True)
     source_message_id = Column(String(64), ForeignKey("messages.id"), nullable=True)
     source_conversation_id = Column(String(64), nullable=True)
     
     memory_type = Column(String(64), nullable=False)  # decision, task, problem, solution, technology, concept, constraint, fact, status_change
     statement = Column(Text, nullable=False)
     rationale = Column(Text, nullable=True)
+    structured_claim = Column(JSON, nullable=True)  # {"subject": "...", "predicate": "...", "object": "...", "scope": {...}}
     details = Column(JSON, default=dict)
     
     # Status: active, superseded, conflicting, deprecated, source_unavailable, forgotten, review_required
@@ -148,6 +166,7 @@ class MemoryVersion(Base):
     version_number = Column(Float, nullable=False)
     statement = Column(Text, nullable=False)
     rationale = Column(Text, nullable=True)
+    structured_claim = Column(JSON, nullable=True)
     details = Column(JSON, default=dict)
     status = Column(String(64), nullable=False)
     change_reason = Column(String(256), nullable=True)

@@ -3,13 +3,13 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from smriti.models import (
-    Workspace, Project, Task, Memory, MemoryVersion, Conversation, Message, RelationshipEdge, User, ProviderAccount, AuditLog
+    Workspace, Project, Task, Memory, MemoryVersion, Conversation, Message, RelationshipEdge, User, ProviderAccount, AuditLog, Milestone
 )
 
 class CanonicalExportEngine:
     """Handles complete export and import of SMRITI memory state without semantic loss."""
 
-    VERSION = "1.1.0"
+    VERSION = "1.2.0"
     DEFAULT_USER_ID = "default-user"
 
     def export_all(self, db: Session, workspace_id: Optional[str] = None) -> Dict[str, Any]:
@@ -17,41 +17,54 @@ class CanonicalExportEngine:
         if workspace_id:
             ws_q = ws_q.filter(Workspace.id == workspace_id)
         workspaces = ws_q.all()
-        active_ws_ids = set(w.id for w in workspaces)
+        active_ws_ids = {w.id for w in workspaces}
 
         if workspace_id:
             # Workspace-scoped export: restrict all entities to those owned by or related to this workspace
-            target_user_ids = set(w.user_id for w in workspaces)
+            target_user_ids = {w.user_id for w in workspaces}
             users = db.query(User).filter(User.id.in_(target_user_ids)).all()
             provider_accounts = db.query(ProviderAccount).filter(ProviderAccount.user_id.in_(target_user_ids)).all()
-            pa_ids = set(pa.id for pa in provider_accounts)
+            pa_ids = {pa.id for pa in provider_accounts}
 
             proj_q = db.query(Project).filter(Project.workspace_id.in_(active_ws_ids))
             projects = proj_q.all()
-            active_proj_ids = set(p.id for p in projects)
+            active_proj_ids = {p.id for p in projects}
 
             tasks = db.query(Task).filter(Task.project_id.in_(active_proj_ids)).all()
+            milestones = db.query(Milestone).filter(Milestone.project_id.in_(active_proj_ids)).all()
             memories = db.query(Memory).filter(Memory.workspace_id.in_(active_ws_ids)).all()
-            mem_ids = set(m.id for m in memories)
+            mem_ids = {m.id for m in memories}
 
             memory_versions = db.query(MemoryVersion).filter(MemoryVersion.memory_id.in_(mem_ids)).all()
 
             # Conversations referenced by memories or provider accounts
-            mem_conv_ids = set(m.source_conversation_id for m in memories if m.source_conversation_id)
+            mem_conv_ids = {m.source_conversation_id for m in memories if m.source_conversation_id}
             conv_q = db.query(Conversation).filter(
                 (Conversation.id.in_(mem_conv_ids)) | (Conversation.provider_account_id.in_(pa_ids))
             )
             conversations = conv_q.all()
-            conv_ids = set(c.id for c in conversations)
+            conv_ids = {c.id for c in conversations}
 
             messages = db.query(Message).filter(Message.conversation_id.in_(conv_ids)).all()
 
             # Edges where either source or target matches any scoped project, memory, or task
             scoped_node_ids = (
-                set(f"project:{p.id}" for p in projects) |
-                set(f"memory:{m.id}" for m in memories) |
-                set(f"task:{t.id}" for t in tasks) |
-                active_ws_ids | active_proj_ids | mem_ids
+                {f"project:{p.id}" for p in projects} |
+                {f"memory:{m.id}" for m in memories} |
+                {f"task:{t.id}" for t in tasks} |
+                {f"milestone:{m.id}" for m in milestones} |
+                {f"conversation:{c.id}" for c in conversations} |
+                {f"message:{msg.id}" for msg in messages} |
+                {f"provider_account:{pa.id}" for pa in provider_accounts} |
+                {f"user:{u.id}" for u in users} |
+                {f"workspace:{w.id}" for w in workspaces} |
+                active_ws_ids | active_proj_ids | mem_ids |
+                {t.id for t in tasks} |
+                {m.id for m in milestones} |
+                {c.id for c in conversations} |
+                {msg.id for msg in messages} |
+                {pa.id for pa in provider_accounts} |
+                {u.id for u in users}
             )
             all_edges = db.query(RelationshipEdge).all()
             edges = [
@@ -71,17 +84,18 @@ class CanonicalExportEngine:
             provider_accounts = db.query(ProviderAccount).all()
             proj_q = db.query(Project).filter(Project.workspace_id.in_(active_ws_ids))
             projects = proj_q.all()
-            active_proj_ids = set(p.id for p in projects)
+            active_proj_ids = {p.id for p in projects}
 
             tasks = db.query(Task).filter(Task.project_id.in_(active_proj_ids)).all()
+            milestones = db.query(Milestone).filter(Milestone.project_id.in_(active_proj_ids)).all()
             memories = db.query(Memory).filter(Memory.workspace_id.in_(active_ws_ids)).all()
-            mem_ids = set(m.id for m in memories)
+            mem_ids = {m.id for m in memories}
 
             memory_versions = db.query(MemoryVersion).filter(MemoryVersion.memory_id.in_(mem_ids)).all()
 
             conv_q = db.query(Conversation)
             conversations = conv_q.all()
-            conv_ids = set(c.id for c in conversations)
+            conv_ids = {c.id for c in conversations}
 
             messages = db.query(Message).filter(Message.conversation_id.in_(conv_ids)).all()
             edges = db.query(RelationshipEdge).all()
@@ -97,6 +111,7 @@ class CanonicalExportEngine:
                 "provider_accounts": len(provider_accounts),
                 "projects": len(projects),
                 "tasks": len(tasks),
+                "milestones": len(milestones),
                 "memories": len(memories),
                 "memory_versions": len(memory_versions),
                 "conversations": len(conversations),
@@ -174,6 +189,19 @@ class CanonicalExportEngine:
                 }
                 for t in tasks
             ],
+            "milestones": [
+                {
+                    "id": ml.id,
+                    "project_id": ml.project_id,
+                    "title": ml.title,
+                    "description": ml.description,
+                    "milestone_type": ml.milestone_type,
+                    "evidence_memory_id": ml.evidence_memory_id,
+                    "reached_at": serialize_dt(ml.reached_at),
+                    "created_at": serialize_dt(ml.created_at)
+                }
+                for ml in milestones
+            ],
             "memories": [
                 {
                     "id": m.id,
@@ -184,6 +212,7 @@ class CanonicalExportEngine:
                     "memory_type": m.memory_type,
                     "statement": m.statement,
                     "rationale": m.rationale,
+                    "structured_claim": m.structured_claim,
                     "details": m.details,
                     "status": m.status,
                     "confidence": m.confidence,
@@ -203,6 +232,7 @@ class CanonicalExportEngine:
                     "version_number": mv.version_number,
                     "statement": mv.statement,
                     "rationale": mv.rationale,
+                    "structured_claim": mv.structured_claim,
                     "details": mv.details,
                     "status": mv.status,
                     "change_reason": mv.change_reason,
@@ -313,6 +343,15 @@ class CanonicalExportEngine:
                         f"Memory collision: memory '{m_data['id']}' belongs to workspace '{existing_m.workspace_id}', not '{m_data.get('workspace_id')}'"
                     )
 
+        # 5. Milestone project collisions
+        for ml_data in bundle.get("milestones", []):
+            existing_ml = db.query(Milestone).filter(Milestone.id == ml_data["id"]).first()
+            if existing_ml:
+                if existing_ml.project_id != ml_data.get("project_id"):
+                    raise ValueError(
+                        f"Milestone collision: milestone '{ml_data['id']}' belongs to project '{existing_ml.project_id}', not '{ml_data.get('project_id')}'"
+                    )
+
     def import_all(self, db: Session, bundle: Dict[str, Any]) -> Dict[str, int]:
         from dateutil import parser
         self.validate_bundle(bundle)
@@ -320,12 +359,14 @@ class CanonicalExportEngine:
 
         counts = {
             "users": 0, "workspaces": 0, "provider_accounts": 0, "projects": 0,
-            "tasks": 0, "conversations": 0, "messages": 0, "memories": 0,
+            "tasks": 0, "milestones": 0, "conversations": 0, "messages": 0, "memories": 0,
             "memory_versions": 0, "relationships": 0, "audit_logs": 0
         }
 
-        def parse_dt(val):
-            return parser.parse(val) if val else datetime.now(timezone.utc)
+        def parse_dt(val, default_now=True):
+            if val:
+                return parser.parse(val)
+            return datetime.now(timezone.utc) if default_now else None
 
         # Atomic transaction
         try:
@@ -402,7 +443,7 @@ class CanonicalExportEngine:
                         constraints=p_data.get("constraints", []),
                         created_at=parse_dt(p_data.get("created_at")),
                         updated_at=parse_dt(p_data.get("updated_at")),
-                        last_confirmed_at=parse_dt(p_data.get("last_confirmed_at"))
+                        last_confirmed_at=parse_dt(p_data.get("last_confirmed_at"), default_now=False)
                     )
                     db.add(p)
                     counts["projects"] += 1
@@ -423,6 +464,22 @@ class CanonicalExportEngine:
                     )
                     db.add(t)
                     counts["tasks"] += 1
+
+            # 5b. Milestones
+            for ml_data in bundle.get("milestones", []):
+                if not db.query(Milestone).filter(Milestone.id == ml_data["id"]).first():
+                    ml = Milestone(
+                        id=ml_data["id"],
+                        project_id=ml_data["project_id"],
+                        title=ml_data["title"],
+                        description=ml_data.get("description"),
+                        milestone_type=ml_data.get("milestone_type", "custom"),
+                        evidence_memory_id=ml_data.get("evidence_memory_id"),
+                        reached_at=parse_dt(ml_data.get("reached_at")),
+                        created_at=parse_dt(ml_data.get("created_at"))
+                    )
+                    db.add(ml)
+                    counts["milestones"] += 1
 
             # 6. Conversations
             for c_data in bundle.get("conversations", []):
@@ -468,6 +525,7 @@ class CanonicalExportEngine:
                         memory_type=mem_data["memory_type"],
                         statement=mem_data["statement"],
                         rationale=mem_data.get("rationale"),
+                        structured_claim=mem_data.get("structured_claim"),
                         details=mem_data.get("details", {}),
                         status=mem_data.get("status", "active"),
                         confidence=mem_data.get("confidence", 1.0),
@@ -490,6 +548,7 @@ class CanonicalExportEngine:
                         version_number=mv_data["version_number"],
                         statement=mv_data["statement"],
                         rationale=mv_data.get("rationale"),
+                        structured_claim=mv_data.get("structured_claim"),
                         details=mv_data.get("details", {}),
                         status=mv_data["status"],
                         change_reason=mv_data.get("change_reason"),

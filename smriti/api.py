@@ -9,19 +9,21 @@ import json
 from smriti.config import settings
 from smriti.models import (
     init_db, get_db, User, Workspace, ProviderAccount,
-    Conversation, Message, Project, Task, Memory, RelationshipEdge, AuditLog
+    Conversation, Message, Project, Task, Milestone, Memory, MemoryVersion, RelationshipEdge, AuditLog
 )
 from smriti.schemas import (
     UserRead, WorkspaceRead, WorkspaceCreate,
     ProviderAccountRead, ProviderAccountCreate,
     ConversationRead, ConversationCreate, MessageRead,
     ProjectRead, ProjectCreate, TaskRead, TaskCreate,
+    MilestoneRead,
     MemoryRead, MemoryCreate, MemoryUpdate,
     ProvenanceExplanation, PortableContextPackage,
     GraphData, SearchResultItem
 )
 from smriti.importers import registry as importer_registry
-from smriti.extraction import MemoryExtractor
+from smriti.extraction import MemoryExtractor, HybridExtractionEngine, ClaimNormalizer
+from smriti.project_intelligence import project_intelligence_service
 from smriti.vector_store import vector_store
 from smriti.graph import graph_service
 from smriti.retrieval import retrieval_engine
@@ -61,6 +63,7 @@ app.add_middleware(
 )
 
 extractor = MemoryExtractor()
+hybrid_extractor = HybridExtractionEngine(heuristic_extractor=extractor, llm_extractor=None)
 
 # --- Global Exception Handling ---
 @app.exception_handler(ValueError)
@@ -179,6 +182,34 @@ def get_project(project_id: str, workspace_id: Optional[str] = None, db: Session
     if not proj:
         raise HTTPException(status_code=404, detail="Project not found")
     return proj
+
+@app.post(
+    "/api/v1/projects/{project_id}/synthesize",
+    responses={404: {"description": "Project not found"}}
+)
+def synthesize_project_state(project_id: str, db: Session = Depends(get_db)):
+    try:
+        synth = project_intelligence_service.synthesize_project_state(db, project_id)
+        milestones = project_intelligence_service.detect_milestones(db, project_id)
+        graph_service.sync_from_db(db)
+        return {
+            "status": "success",
+            "synthesis": synth,
+            "milestones_count": len(milestones)
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.get(
+    "/api/v1/projects/{project_id}/milestones",
+    response_model=List[MilestoneRead],
+    responses={404: {"description": "Project not found"}}
+)
+def list_project_milestones(project_id: str, db: Session = Depends(get_db)):
+    proj = db.query(Project).filter(Project.id == project_id).first()
+    if not proj:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return db.query(Milestone).filter(Milestone.project_id == project_id).order_by(Milestone.reached_at.asc()).all()
 
 # --- Tasks ---
 @app.post("/api/v1/tasks", response_model=TaskRead, status_code=status.HTTP_201_CREATED)
@@ -302,6 +333,15 @@ def create_memory(data: MemoryCreate, db: Session = Depends(get_db)):
     if not data.source_message_id and not data.source_conversation_id:
         extraction_method = "user_explicit"
 
+    claim_data = None
+    if data.structured_claim is not None:
+        if hasattr(data.structured_claim, "model_dump"):
+            claim_data = data.structured_claim.model_dump()
+        elif isinstance(data.structured_claim, dict):
+            claim_data = data.structured_claim
+        else:
+            claim_data = dict(data.structured_claim)
+
     mem = Memory(
         workspace_id=ws_id,
         project_id=data.project_id,
@@ -310,6 +350,7 @@ def create_memory(data: MemoryCreate, db: Session = Depends(get_db)):
         memory_type=data.memory_type,
         statement=data.statement,
         rationale=data.rationale,
+        structured_claim=claim_data,
         details=data.details or {},
         status=data.status,
         confidence=data.confidence,
@@ -335,10 +376,22 @@ def explain_memory(memory_id: str, db: Session = Depends(get_db)):
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-@app.post("/api/v1/memories/{memory_id}/resolve", response_model=MemoryRead)
-def resolve_memory_conflict(
-    memory_id: str,
-    resolution_action: str = Query(..., description="keep_active, supersede, deprecate, or forget"),
+@app.get("/api/v1/conflicts")
+def get_conflicts(
+    workspace_id: str = "default-workspace",
+    project_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    return memory_manager.get_conflicts(db, workspace_id, project_id)
+
+@app.post(
+    "/api/v1/conflicts/resolve",
+    responses={400: {"description": "Invalid conflict resolution request"}}
+)
+def resolve_conflict_flow(
+    memory_id: str = Query(...),
+    resolution_action: str = Query(..., description="keep_active, keep_both, supersede, deprecate, or forget"),
+    paired_memory_id: Optional[str] = None,
     superseded_by_id: Optional[str] = None,
     reason: Optional[str] = None,
     db: Session = Depends(get_db)
@@ -349,6 +402,7 @@ def resolve_memory_conflict(
             memory_id=memory_id,
             resolution_action=resolution_action,
             superseded_by_id=superseded_by_id,
+            paired_memory_id=paired_memory_id,
             reason=reason
         )
         if mem.status == "forgotten":
@@ -359,6 +413,63 @@ def resolve_memory_conflict(
                 f"{mem.statement} {mem.rationale or ''}",
                 {"workspace_id": mem.workspace_id, "project_id": mem.project_id, "status": mem.status}
             )
+
+        if paired_memory_id:
+            paired_mem = db.query(Memory).filter(Memory.id == paired_memory_id).first()
+            if paired_mem:
+                if paired_mem.status == "forgotten":
+                    vector_store.delete(paired_mem.id)
+                else:
+                    vector_store.upsert(
+                        paired_mem.id,
+                        f"{paired_mem.statement} {paired_mem.rationale or ''}",
+                        {"workspace_id": paired_mem.workspace_id, "project_id": paired_mem.project_id, "status": paired_mem.status}
+                    )
+
+        graph_service.sync_from_db(db)
+        return {"status": "success", "resolved_memory": mem.id, "action": resolution_action}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/v1/memories/{memory_id}/resolve", response_model=MemoryRead)
+def resolve_memory_conflict(
+    memory_id: str,
+    resolution_action: str = Query(..., description="keep_active, keep_both, supersede, deprecate, or forget"),
+    paired_memory_id: Optional[str] = None,
+    superseded_by_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    try:
+        mem = memory_manager.resolve_conflict(
+            db=db,
+            memory_id=memory_id,
+            resolution_action=resolution_action,
+            superseded_by_id=superseded_by_id,
+            paired_memory_id=paired_memory_id,
+            reason=reason
+        )
+        if mem.status == "forgotten":
+            vector_store.delete(mem.id)
+        else:
+            vector_store.upsert(
+                mem.id,
+                f"{mem.statement} {mem.rationale or ''}",
+                {"workspace_id": mem.workspace_id, "project_id": mem.project_id, "status": mem.status}
+            )
+
+        if paired_memory_id:
+            paired_mem = db.query(Memory).filter(Memory.id == paired_memory_id).first()
+            if paired_mem:
+                if paired_mem.status == "forgotten":
+                    vector_store.delete(paired_mem.id)
+                else:
+                    vector_store.upsert(
+                        paired_mem.id,
+                        f"{paired_mem.statement} {paired_mem.rationale or ''}",
+                        {"workspace_id": paired_mem.workspace_id, "project_id": paired_mem.project_id, "status": paired_mem.status}
+                    )
+
         graph_service.sync_from_db(db)
         return mem
     except ValueError as e:
@@ -433,13 +544,23 @@ def import_conversations(
 
         if auto_extract:
             for msg in db_messages:
-                candidates = extractor.extract_from_message(msg.role, msg.content)
+                actual_method = "hybrid_llm_rule" if hybrid_extractor.llm_extractor else "rule_heuristic"
+                candidates = hybrid_extractor.extract(msg.role, msg.content, use_llm=True)
                 if candidates:
-                    existing_mems = db.query(Memory).filter(Memory.project_id == project_id).all() if project_id else []
-                    diffs = memory_manager.record_diff(db, existing_mems, candidates)
-                    all_diffs.extend(diffs)
+                    existing_mems = db.query(Memory).filter(Memory.workspace_id == ws_id).all()
+                    diffs = memory_manager.record_diff(existing_mems, candidates, workspace_id=ws_id, project_id=project_id)
+                    all_diffs.extend([d.model_dump() for d in diffs])
 
-                    for cand in candidates:
+                    for cand, diff in zip(candidates, diffs):
+                        # If duplicate / unchanged, skip re-inserting
+                        if diff.change_type == "UNCHANGED":
+                            continue
+
+                        # If candidate supersedes an existing active memory, we don't need to do it here,
+                        # we can do it all in the post-creation block below to ensure atomic relationships.
+
+                        cand_status = "review_required" if diff.review_required else cand.status
+
                         mem = Memory(
                             workspace_id=ws_id,
                             project_id=project_id,
@@ -448,14 +569,85 @@ def import_conversations(
                             memory_type=cand.memory_type,
                             statement=cand.statement,
                             rationale=cand.rationale,
+                            structured_claim=cand.structured_claim,
                             details=cand.details,
-                            status=cand.status,
+                            status=cand_status,
                             confidence=cand.confidence,
-                            extraction_method="rule_heuristic"
+                            extraction_method=actual_method
                         )
                         db.add(mem)
                         db.commit()
                         db.refresh(mem)
+
+                        if diff.change_type == "SUPERSEDED" and diff.existing_memory_id:
+                            mem.superseded_by_id = None  # this is the new one
+                            old_mem = db.query(Memory).filter(Memory.id == diff.existing_memory_id).first()
+                            if old_mem and old_mem.structured_claim:
+                                subject = old_mem.structured_claim.get("subject")
+                                predicate = old_mem.structured_claim.get("predicate")
+                                obj = old_mem.structured_claim.get("object")
+
+                                if subject and predicate and obj:
+                                    all_active = db.query(Memory).filter(
+                                        Memory.workspace_id == ws_id,
+                                        Memory.status == "active"
+                                    ).all()
+
+                                    mems_to_supersede = []
+                                    for act_mem in all_active:
+                                        if act_mem.structured_claim and act_mem.structured_claim.get("subject") == subject and act_mem.structured_claim.get("predicate") == predicate and act_mem.structured_claim.get("object") == obj:
+                                            if mem.project_id != act_mem.project_id:
+                                                continue
+
+                                            mem_scope = mem.structured_claim.get("scope") or {} if mem.structured_claim else {}
+                                            act_scope = act_mem.structured_claim.get("scope") or {}
+
+                                            # Helper to check scope distinction inline
+                                            scopes_distinct = False
+                                            for k in set(mem_scope.keys()).union(set(act_scope.keys())):
+                                                v1 = mem_scope.get(k)
+                                                v2 = act_scope.get(k)
+                                                if v1 and v2 and v1 != v2:
+                                                    scopes_distinct = True
+                                                    break
+
+                                            if scopes_distinct:
+                                                continue
+
+                                            mems_to_supersede.append(act_mem)
+
+                                    for t_mem in mems_to_supersede:
+                                        t_mem.superseded_by_id = mem.id
+                                        t_mem.status = "superseded"
+                                        t_mem.updated_at = datetime.now(timezone.utc)
+                                        t_version = MemoryVersion(
+                                            memory_id=t_mem.id,
+                                            version_number=round(t_mem.version + 1.0, 1),
+                                            statement=t_mem.statement,
+                                            rationale=t_mem.rationale,
+                                            structured_claim=t_mem.structured_claim,
+                                            details=t_mem.details,
+                                            status="superseded",
+                                            change_reason=f"Superseded during conversation import by {mem.id}"
+                                        )
+                                        t_mem.version = t_version.version_number
+                                        db.add(t_version)
+
+                                        vector_store.upsert(
+                                            t_mem.id,
+                                            f"{t_mem.statement} {t_mem.rationale or ''}",
+                                            {"workspace_id": t_mem.workspace_id, "project_id": t_mem.project_id, "status": "superseded"}
+                                        )
+                                        graph_service.add_edge(
+                                            db=db,
+                                            source_type="memory",
+                                            source_id=mem.id,
+                                            relation="SUPERSEDES",
+                                            target_type="memory",
+                                            target_id=t_mem.id
+                                        )
+                                    db.commit()
+
                         vector_store.upsert(
                             mem.id,
                             f"{mem.statement} {mem.rationale or ''}",
