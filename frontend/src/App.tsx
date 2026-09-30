@@ -546,7 +546,7 @@ export function App() {
                     <h3 style={{ margin: 0, fontSize: '16px' }}>Portable AI System Prompt</h3>
                     <button
                       onClick={() => {
-                        navigator.clipboard.writeText(contextPackage.formatted_prompt);
+                        navigator.clipboard.writeText(contextPackage.formatted_prompt).catch(console.error);
                         setCopiedPrompt(true);
                         setTimeout(() => setCopiedPrompt(false), 2000);
                       }}
