@@ -8,6 +8,8 @@ from smriti.config import settings
 
 Base = declarative_base()
 
+PROJECT_FK = "projects.id"
+
 def utcnow():
     return datetime.now(timezone.utc)
 
@@ -101,7 +103,7 @@ class Project(Base):
 class Task(Base):
     __tablename__ = "tasks"
     id = Column(String(64), primary_key=True, default=generate_uuid)
-    project_id = Column(String(64), ForeignKey("projects.id"), nullable=False)
+    project_id = Column(String(64), ForeignKey(PROJECT_FK), nullable=False)
     title = Column(String(512), nullable=False)
     description = Column(Text, nullable=True)
     status = Column(String(64), default="todo")  # todo, in_progress, completed, blocked
@@ -115,7 +117,7 @@ class Task(Base):
 class Milestone(Base):
     __tablename__ = "milestones"
     id = Column(String(64), primary_key=True, default=generate_uuid)
-    project_id = Column(String(64), ForeignKey("projects.id"), nullable=False)
+    project_id = Column(String(64), ForeignKey(PROJECT_FK), nullable=False)
     title = Column(String(256), nullable=False)
     description = Column(Text, nullable=True)
     milestone_type = Column(String(64), nullable=False)  # project_created, architecture_decided, technology_selected, feature_completed, phase_completed
@@ -130,7 +132,7 @@ class Memory(Base):
     __tablename__ = "memories"
     id = Column(String(64), primary_key=True, default=generate_uuid)
     workspace_id = Column(String(64), ForeignKey("workspaces.id"), nullable=False)
-    project_id = Column(String(64), ForeignKey("projects.id"), nullable=True)
+    project_id = Column(String(64), ForeignKey(PROJECT_FK), nullable=True)
     source_message_id = Column(String(64), ForeignKey("messages.id"), nullable=True)
     source_conversation_id = Column(String(64), nullable=True)
     

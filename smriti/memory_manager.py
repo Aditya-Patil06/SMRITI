@@ -12,7 +12,6 @@ class MemoryManager:
 
     def record_diff(
         self,
-        db: Session,
         existing_memories: List[Memory],
         new_candidates: List[Any],
         workspace_id: str,

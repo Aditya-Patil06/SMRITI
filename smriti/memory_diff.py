@@ -74,38 +74,48 @@ class MemoryDiffEngine:
             return None
 
         # 1. Explicit replacement field
-        if cand_replaces_norm and cand_replaces_norm == old_obj:
-            if not cand_claim or (
-                cand_claim.get("subject") == old_subj and cand_claim.get("predicate") == old_pred
+        if (
+            cand_replaces_norm
+            and cand_replaces_norm == old_obj
+            and (
+                not cand_claim
+                or (
+                    cand_claim.get("subject") == old_subj
+                    and cand_claim.get("predicate") == old_pred
+                )
+            )
+        ):
+            return DiffResult(
+                change_type="SUPERSEDED",
+                candidate_statement=candidate.statement,
+                existing_memory_id=old.id,
+                existing_statement=old.statement,
+                reason=f"Candidate explicitly supersedes object '{old_obj}'",
+                confidence=0.95,
+                review_required=False,
+                evidence={"replaces": cand_replaces_norm, "matched_field": "explicit_replaces"}
+            )
+
+        # 2. Replacement keyword in candidate statement referencing old object
+        if has_replacement_kw and old_obj:
+            cand_stmt_lower = candidate.statement.lower()
+            if self._contains_word(cand_stmt_lower, old_obj) and (
+                not cand_claim
+                or (
+                    cand_claim.get("subject") == old_subj
+                    and cand_claim.get("predicate") == old_pred
+                )
             ):
                 return DiffResult(
                     change_type="SUPERSEDED",
                     candidate_statement=candidate.statement,
                     existing_memory_id=old.id,
                     existing_statement=old.statement,
-                    reason=f"Candidate explicitly supersedes object '{old_obj}'",
-                    confidence=0.95,
+                    reason=f"Claim replacement indicated for subject '{old_subj}'",
+                    confidence=0.94,
                     review_required=False,
-                    evidence={"replaces": cand_replaces_norm, "matched_field": "explicit_replaces"}
+                    evidence={"superseded_object": old_obj}
                 )
-
-        # 2. Replacement keyword in candidate statement referencing old object
-        if has_replacement_kw and old_obj:
-            cand_stmt_lower = candidate.statement.lower()
-            if self._contains_word(cand_stmt_lower, old_obj):
-                if not cand_claim or (
-                    cand_claim.get("subject") == old_subj and cand_claim.get("predicate") == old_pred
-                ):
-                    return DiffResult(
-                        change_type="SUPERSEDED",
-                        candidate_statement=candidate.statement,
-                        existing_memory_id=old.id,
-                        existing_statement=old.statement,
-                        reason=f"Claim replacement indicated for subject '{old_subj}'",
-                        confidence=0.94,
-                        review_required=False,
-                        evidence={"superseded_object": old_obj}
-                    )
 
         return None
 

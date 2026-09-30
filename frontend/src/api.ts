@@ -170,7 +170,7 @@ async function fetchJson<T>(input: RequestInfo | URL, init?: RequestInit): Promi
     let errorDetail = res.statusText;
     try {
       const errData = await res.json();
-      if (errData && errData.detail) {
+      if (errData?.detail) {
         errorDetail = typeof errData.detail === "string" ? errData.detail : JSON.stringify(errData.detail);
       }
     } catch {

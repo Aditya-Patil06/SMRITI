@@ -17,54 +17,54 @@ class CanonicalExportEngine:
         if workspace_id:
             ws_q = ws_q.filter(Workspace.id == workspace_id)
         workspaces = ws_q.all()
-        active_ws_ids = set(w.id for w in workspaces)
+        active_ws_ids = {w.id for w in workspaces}
 
         if workspace_id:
             # Workspace-scoped export: restrict all entities to those owned by or related to this workspace
-            target_user_ids = set(w.user_id for w in workspaces)
+            target_user_ids = {w.user_id for w in workspaces}
             users = db.query(User).filter(User.id.in_(target_user_ids)).all()
             provider_accounts = db.query(ProviderAccount).filter(ProviderAccount.user_id.in_(target_user_ids)).all()
-            pa_ids = set(pa.id for pa in provider_accounts)
+            pa_ids = {pa.id for pa in provider_accounts}
 
             proj_q = db.query(Project).filter(Project.workspace_id.in_(active_ws_ids))
             projects = proj_q.all()
-            active_proj_ids = set(p.id for p in projects)
+            active_proj_ids = {p.id for p in projects}
 
             tasks = db.query(Task).filter(Task.project_id.in_(active_proj_ids)).all()
             milestones = db.query(Milestone).filter(Milestone.project_id.in_(active_proj_ids)).all()
             memories = db.query(Memory).filter(Memory.workspace_id.in_(active_ws_ids)).all()
-            mem_ids = set(m.id for m in memories)
+            mem_ids = {m.id for m in memories}
 
             memory_versions = db.query(MemoryVersion).filter(MemoryVersion.memory_id.in_(mem_ids)).all()
 
             # Conversations referenced by memories or provider accounts
-            mem_conv_ids = set(m.source_conversation_id for m in memories if m.source_conversation_id)
+            mem_conv_ids = {m.source_conversation_id for m in memories if m.source_conversation_id}
             conv_q = db.query(Conversation).filter(
                 (Conversation.id.in_(mem_conv_ids)) | (Conversation.provider_account_id.in_(pa_ids))
             )
             conversations = conv_q.all()
-            conv_ids = set(c.id for c in conversations)
+            conv_ids = {c.id for c in conversations}
 
             messages = db.query(Message).filter(Message.conversation_id.in_(conv_ids)).all()
 
             # Edges where either source or target matches any scoped project, memory, or task
             scoped_node_ids = (
-                set(f"project:{p.id}" for p in projects) |
-                set(f"memory:{m.id}" for m in memories) |
-                set(f"task:{t.id}" for t in tasks) |
-                set(f"milestone:{m.id}" for m in milestones) |
-                set(f"conversation:{c.id}" for c in conversations) |
-                set(f"message:{msg.id}" for msg in messages) |
-                set(f"provider_account:{pa.id}" for pa in provider_accounts) |
-                set(f"user:{u.id}" for u in users) |
-                set(f"workspace:{w.id}" for w in workspaces) |
+                {f"project:{p.id}" for p in projects} |
+                {f"memory:{m.id}" for m in memories} |
+                {f"task:{t.id}" for t in tasks} |
+                {f"milestone:{m.id}" for m in milestones} |
+                {f"conversation:{c.id}" for c in conversations} |
+                {f"message:{msg.id}" for msg in messages} |
+                {f"provider_account:{pa.id}" for pa in provider_accounts} |
+                {f"user:{u.id}" for u in users} |
+                {f"workspace:{w.id}" for w in workspaces} |
                 active_ws_ids | active_proj_ids | mem_ids |
-                set(t.id for t in tasks) |
-                set(m.id for m in milestones) |
-                set(c.id for c in conversations) |
-                set(msg.id for msg in messages) |
-                set(pa.id for pa in provider_accounts) |
-                set(u.id for u in users)
+                {t.id for t in tasks} |
+                {m.id for m in milestones} |
+                {c.id for c in conversations} |
+                {msg.id for msg in messages} |
+                {pa.id for pa in provider_accounts} |
+                {u.id for u in users}
             )
             all_edges = db.query(RelationshipEdge).all()
             edges = [
@@ -84,18 +84,18 @@ class CanonicalExportEngine:
             provider_accounts = db.query(ProviderAccount).all()
             proj_q = db.query(Project).filter(Project.workspace_id.in_(active_ws_ids))
             projects = proj_q.all()
-            active_proj_ids = set(p.id for p in projects)
+            active_proj_ids = {p.id for p in projects}
 
             tasks = db.query(Task).filter(Task.project_id.in_(active_proj_ids)).all()
             milestones = db.query(Milestone).filter(Milestone.project_id.in_(active_proj_ids)).all()
             memories = db.query(Memory).filter(Memory.workspace_id.in_(active_ws_ids)).all()
-            mem_ids = set(m.id for m in memories)
+            mem_ids = {m.id for m in memories}
 
             memory_versions = db.query(MemoryVersion).filter(MemoryVersion.memory_id.in_(mem_ids)).all()
 
             conv_q = db.query(Conversation)
             conversations = conv_q.all()
-            conv_ids = set(c.id for c in conversations)
+            conv_ids = {c.id for c in conversations}
 
             messages = db.query(Message).filter(Message.conversation_id.in_(conv_ids)).all()
             edges = db.query(RelationshipEdge).all()

@@ -32,8 +32,6 @@ class ProjectIntelligenceService:
             Memory.status == "active"
         ).order_by(Memory.created_at.asc()).all()
 
-        tasks = db.query(Task).filter(Task.project_id == project_id).all()
-
         derived_tech_stack = set()
         derived_constraints = set()
         architecture_points = []
@@ -47,14 +45,12 @@ class ProjectIntelligenceService:
                 claim = m.structured_claim
                 pred = claim.get("predicate", "")
                 obj = claim.get("object", "")
-                if pred in ["uses_database", "uses_backend_framework", "uses_frontend_framework", "uses_technology", "uses_orm", "uses_language", "uses_cache"]:
-                    if obj:
-                        derived_tech_stack.add(obj)
-                        handled_by_claim = True
-                if pred in ["constrained_by", "requires_compliance"]:
-                    if obj:
-                        derived_constraints.add(obj)
-                        handled_by_claim = True
+                if pred in ["uses_database", "uses_backend_framework", "uses_frontend_framework", "uses_technology", "uses_orm", "uses_language", "uses_cache"] and obj:
+                    derived_tech_stack.add(obj)
+                    handled_by_claim = True
+                if pred in ["constrained_by", "requires_compliance"] and obj:
+                    derived_constraints.add(obj)
+                    handled_by_claim = True
 
             # If not already handled by structured claim, check legacy types
             if not handled_by_claim:

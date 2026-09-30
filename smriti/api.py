@@ -183,7 +183,10 @@ def get_project(project_id: str, workspace_id: Optional[str] = None, db: Session
         raise HTTPException(status_code=404, detail="Project not found")
     return proj
 
-@app.post("/api/v1/projects/{project_id}/synthesize")
+@app.post(
+    "/api/v1/projects/{project_id}/synthesize",
+    responses={404: {"description": "Project not found"}}
+)
 def synthesize_project_state(project_id: str, db: Session = Depends(get_db)):
     try:
         synth = project_intelligence_service.synthesize_project_state(db, project_id)
@@ -197,7 +200,11 @@ def synthesize_project_state(project_id: str, db: Session = Depends(get_db)):
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-@app.get("/api/v1/projects/{project_id}/milestones", response_model=List[MilestoneRead])
+@app.get(
+    "/api/v1/projects/{project_id}/milestones",
+    response_model=List[MilestoneRead],
+    responses={404: {"description": "Project not found"}}
+)
 def list_project_milestones(project_id: str, db: Session = Depends(get_db)):
     proj = db.query(Project).filter(Project.id == project_id).first()
     if not proj:
@@ -377,7 +384,10 @@ def get_conflicts(
 ):
     return memory_manager.get_conflicts(db, workspace_id, project_id)
 
-@app.post("/api/v1/conflicts/resolve")
+@app.post(
+    "/api/v1/conflicts/resolve",
+    responses={400: {"description": "Invalid conflict resolution request"}}
+)
 def resolve_conflict_flow(
     memory_id: str = Query(...),
     resolution_action: str = Query(..., description="keep_active, keep_both, supersede, deprecate, or forget"),
@@ -538,7 +548,7 @@ def import_conversations(
                 candidates = hybrid_extractor.extract(msg.role, msg.content, use_llm=True)
                 if candidates:
                     existing_mems = db.query(Memory).filter(Memory.workspace_id == ws_id).all()
-                    diffs = memory_manager.record_diff(db, existing_mems, candidates, workspace_id=ws_id, project_id=project_id)
+                    diffs = memory_manager.record_diff(existing_mems, candidates, workspace_id=ws_id, project_id=project_id)
                     all_diffs.extend([d.model_dump() for d in diffs])
 
                     for cand, diff in zip(candidates, diffs):

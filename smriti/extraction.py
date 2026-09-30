@@ -17,6 +17,8 @@ class ExtractedCandidate(BaseModel):
     entities: List[Dict[str, Any]] = Field(default_factory=list)  # [{"name": "...", "entity_type": "..."}]
     relationships: List[Dict[str, Any]] = Field(default_factory=list)  # [{"source": "...", "relation": "...", "target": "..."}]
 
+NEXT_JS = "next.js"
+
 class ClaimNormalizer:
     """Normalizes entities, aliases, and predicates deterministically."""
 
@@ -39,9 +41,9 @@ class ClaimNormalizer:
         "react.js": "react",
         "reactjs": "react",
         "react": "react",
-        "nextjs": "next.js",
-        "next.js": "next.js",
-        "next": "next.js",
+        "nextjs": NEXT_JS,
+        NEXT_JS: NEXT_JS,
+        "next": NEXT_JS,
         "vuejs": "vue",
         "vue.js": "vue",
         "vue": "vue",
