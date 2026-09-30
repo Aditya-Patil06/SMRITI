@@ -36,7 +36,7 @@ export function App() {
   const [importStatus, setImportStatus] = useState<string>('');
 
   useEffect(() => {
-    loadData();
+    void loadData();
   }, []);
 
   async function loadData() {
@@ -64,8 +64,9 @@ export function App() {
     try {
       await api.resolveConflictFlow(memId, action, pairedId, supersededById, `Resolved via Conflict Review (${action})`);
       alert(`Conflict resolved: ${action}`);
-      loadData();
+      await loadData();
     } catch (e) {
+      console.error(e);
       alert("Error resolving conflict");
     }
   }
@@ -74,8 +75,9 @@ export function App() {
     try {
       await api.synthesizeProject(projectId);
       alert("Project state synthesized & milestones detected!");
-      loadData();
+      await loadData();
     } catch (e) {
+      console.error(e);
       alert("Failed to synthesize project state");
     }
   }
@@ -85,6 +87,7 @@ export function App() {
       const exp = await api.explainMemory(memId);
       setSelectedMemory(exp);
     } catch (e) {
+      console.error(e);
       alert("Error retrieving provenance explanation");
     }
   }
@@ -94,8 +97,9 @@ export function App() {
       await api.resolveMemory(memId, action, `User resolved as ${action}`);
       alert(`Memory updated to ${action}`);
       setSelectedMemory(null);
-      loadData();
+      await loadData();
     } catch (e) {
+      console.error(e);
       alert("Error resolving conflict");
     }
   }
@@ -106,6 +110,7 @@ export function App() {
       const pkg = await api.getContextPackage(contextQuery);
       setContextPackage(pkg);
     } catch (e) {
+      console.error(e);
       alert("Failed to compile context package");
     }
   }
@@ -117,8 +122,9 @@ export function App() {
       const parsed = JSON.parse(importJson);
       const res = await api.importConversations(selectedProvider, parsed);
       setImportStatus(`Success! Imported ${res.imported_conversations} conversations and extracted ${res.extracted_memories} memories.`);
-      loadData();
+      await loadData();
     } catch (e: any) {
+      console.error(e);
       setImportStatus(`Import error: ${e.message}`);
     }
   }
@@ -133,6 +139,7 @@ export function App() {
       a.download = `smriti-export-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
     } catch (e) {
+      console.error(e);
       alert("Export failed");
     }
   }
@@ -306,12 +313,16 @@ export function App() {
                 placeholder="Search memories or filter by topic..."
                 style={{ flex: 1, padding: '10px 16px', background: '#0f172a', border: '1px solid #1e293b', borderRadius: '8px', color: '#e2e8f0' }}
                 onChange={async (e) => {
-                  const q = e.target.value;
-                  if (q.trim().length > 2) {
+                  try {
+                    const q = e.target.value;
                     const hits = await api.getMemories();
-                    setMemories(hits.filter(h => h.statement.toLowerCase().includes(q.toLowerCase())));
-                  } else {
-                    api.getMemories().then(setMemories);
+                    if (q.trim().length > 2) {
+                      setMemories(hits.filter(h => h.statement.toLowerCase().includes(q.toLowerCase())));
+                    } else {
+                      setMemories(hits);
+                    }
+                  } catch (err) {
+                    console.error(err);
                   }
                 }}
               />
