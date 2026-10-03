@@ -2,6 +2,7 @@ import pytest
 import os
 import threading
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
 from smriti.vector_store import PgVectorStore, VectorFilter
 from smriti.embeddings import MockEmbeddingProvider
 from smriti.models import Base, EmbeddingMetadata
@@ -14,7 +15,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def pg_engine():
     db_url = os.environ.get("SMRITI_DATABASE_URL", "postgresql://postgres:postgrespassword@localhost:5432/smriti_test")
-    engine = create_engine(db_url)
+    engine = create_engine(db_url, poolclass=NullPool)
     
     with engine.begin() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
@@ -129,6 +130,8 @@ def test_query_plan_hnsw_fallback(pg_session):
     explain_rows = db.execute(text(f"EXPLAIN SELECT e.memory_id FROM embedding_metadata e WHERE e.embedding_dimension = 64 ORDER BY e.embedding::vector(64) <=> '{vec_str}' LIMIT 10")).fetchall()
     explain = "\n".join(r[0] for r in explain_rows)
     
+    db.execute(text("SET enable_seqscan = on;"))
+    
     # We allow the planner to use an index scan if forced
     assert "Index Scan" in explain, f"Expected Index Scan in plan, got:\\n{explain}"
 
@@ -155,6 +158,8 @@ def test_workspace_isolation(pg_engine):
     
     f = VectorFilter(workspace_id="w_iso")
     res = store.search("secret", filters=f)
+    db.close()
+    
     assert len(res) == 1
     assert res[0][0] == "w_iso_m"
 
@@ -188,6 +193,8 @@ def test_concurrency(pg_engine):
         t.join()
         
     records = db.query(EmbeddingMetadata).filter_by(memory_id="conc_mem").all()
+    db.close()
+    
     assert len(records) == 1
 
 def test_hnsw_recall(pg_session):
@@ -214,6 +221,9 @@ def test_hnsw_recall(pg_session):
     
     exact_set = {r[0] for r in exact_res}
     approx_set = {r[0] for r in approx_res}
+    
+    db.execute(text("SET enable_indexscan = on"))
+    db.execute(text("SET enable_seqscan = on"))
     
     recall = len(exact_set.intersection(approx_set)) / len(exact_set)
     # HNSW approximate recall threshold for this deterministic CI fixture
