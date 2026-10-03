@@ -156,6 +156,90 @@ def test_workspace_isolation(pg_engine):
     store.upsert("w_iso_m", "secret", meta={})
     store.upsert("w2_m", "secret", meta={})
     
+    # ---- Temporary diagnostic probes (will be removed later) ----
+    # Use the same session (db) for all probes to avoid session‑level planner differences.
+    # Baseline: exact reference query (disable index scans)
+    db.execute(text("SET enable_indexscan = off; SET enable_bitmapscan = off; SET enable_seqscan = on;"))
+
+    # Common parameters for queries
+    provider_params = {
+        "m_name": provider.model_name,
+        "m_version": provider.model_version,
+        "m_dim": provider.dimension,
+    }
+
+    # Probe A – workspace predicate only (no status predicate)
+    probe_a_sql = """
+        SELECT e.memory_id, m.workspace_id, m.status, e.model_name, e.model_version, e.embedding_dimension
+        FROM embedding_metadata e
+        JOIN memories m ON e.memory_id = m.id
+        WHERE e.model_name = :m_name
+          AND e.model_version = :m_version
+          AND e.embedding_dimension = :m_dim
+          AND m.workspace_id = :w_id
+    """
+    a_params = dict(provider_params, w_id="w_iso")
+    a_rows = db.execute(text(probe_a_sql), a_params).fetchall()
+    print("[DIAG] Probe A rows (workspace only):", a_rows)
+
+    # Probe B – status predicate only (exclude workspace predicate)
+    probe_b_sql = """
+        SELECT e.memory_id, m.workspace_id, m.status, e.model_name, e.model_version, e.embedding_dimension
+        FROM embedding_metadata e
+        JOIN memories m ON e.memory_id = m.id
+        WHERE e.model_name = :m_name
+          AND e.model_version = :m_version
+          AND e.embedding_dimension = :m_dim
+          AND m.status NOT IN ('superseded', 'forgotten')
+    """
+    b_rows = db.execute(text(probe_b_sql), provider_params).fetchall()
+    print("[DIAG] Probe B rows (status only):", b_rows)
+
+    # Probe C – both workspace and status predicates
+    probe_c_sql = """
+        SELECT e.memory_id, m.workspace_id, m.status, e.model_name, e.model_version, e.embedding_dimension
+        FROM embedding_metadata e
+        JOIN memories m ON e.memory_id = m.id
+        WHERE e.model_name = :m_name
+          AND e.model_version = :m_version
+          AND e.embedding_dimension = :m_dim
+          AND m.workspace_id = :w_id
+          AND m.status NOT IN ('superseded', 'forgotten')
+    """
+    c_rows = db.execute(text(probe_c_sql), a_params).fetchall()
+    print("[DIAG] Probe C rows (both predicates):", c_rows)
+
+    # Probe D – direct row inspection for the two memory IDs
+    probe_d_sql = """
+        SELECT
+            m.id AS memory_id,
+            m.workspace_id,
+            m.status,
+            e.model_name,
+            e.model_version,
+            e.embedding_dimension
+        FROM memories m
+        LEFT JOIN embedding_metadata e ON e.memory_id = m.id
+        WHERE m.id IN ('w_iso_m', 'w2_m')
+        ORDER BY m.id;
+    """
+    d_rows = db.execute(text(probe_d_sql)).fetchall()
+    print("[DIAG] Probe D rows (direct inspection):", d_rows)
+
+    # Reset planner settings before HNSW forced query
+    db.execute(text("SET enable_indexscan = on; SET enable_bitmapscan = off; SET enable_seqscan = off; SET hnsw.iterative_scan = strict_order;"))
+
+    # HNSW forced query (both predicates)
+    hnsw_rows = db.execute(text(probe_c_sql), a_params).fetchall()
+    print("[DIAG] HNSW forced rows:", hnsw_rows)
+    explain_rows = db.execute(text(f"EXPLAIN {probe_c_sql}"), a_params).fetchall()
+    explain_str = "\n".join(row[0] for row in explain_rows)
+    print("[DIAG] HNSW EXPLAIN output:\n", explain_str)
+
+    # Restore default settings for the actual store.search call
+    db.execute(text("SET enable_indexscan = on; SET enable_seqscan = on;"))
+
+    # ---- End of temporary diagnostics ----
     f = VectorFilter(workspace_id="w_iso")
     res = store.search("secret", filters=f)
     db.close()
