@@ -42,13 +42,13 @@ jobs:
         
     - name: Run Layer B Alembic Migrations
       env:
-        DATABASE_URL: "postgresql://postgres:postgrespassword@localhost:5432/smriti_test"
+        SMRITI_DATABASE_URL: "postgresql://postgres:postgrespassword@localhost:5432/smriti_test"
       run: |
         alembic upgrade head
 
     - name: Run Layer B Tests (PostgreSQL + pgvector)
       env:
         SMRITI_PG_TESTS: "1"
-        DATABASE_URL: "postgresql://postgres:postgrespassword@localhost:5432/smriti_test"
+        SMRITI_DATABASE_URL: "postgresql://postgres:postgrespassword@localhost:5432/smriti_test"
       run: |
         pytest tests/test_phase3_pgvector.py -v -s
