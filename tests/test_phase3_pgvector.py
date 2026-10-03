@@ -44,8 +44,19 @@ def pg_engine():
 @pytest.fixture
 def pg_session(pg_engine):
     from sqlalchemy.orm import sessionmaker
+    from smriti.models import User, Workspace
     Session = sessionmaker(bind=pg_engine)
     db = Session()
+    
+    if not db.query(User).filter_by(id="u1").first():
+        db.add(User(id="u1", email="test@test.com", password_hash="hash"))
+        db.commit()
+        
+    for w_id in ["w1", "w2", "wplan", "w_all"]:
+        if not db.query(Workspace).filter_by(id=w_id).first():
+            db.add(Workspace(id=w_id, user_id="u1", name=w_id))
+    db.commit()
+
     yield lambda: db
     db.close()
 
@@ -57,6 +68,11 @@ def test_extension_and_vector_type(pg_engine):
         print(f"\\n[INFO] PostgreSQL pgvector version: {result[1]}")
 
 def test_idempotency_constraint(pg_session):
+    db = pg_session()
+    from smriti.models import Memory
+    db.add(Memory(id="m1", workspace_id="w1", statement="text", memory_type="fact"))
+    db.commit()
+    
     provider = MockEmbeddingProvider(dimension=64)
     store = PgVectorStore(provider, pg_session)
     store.upsert("m1", "text", meta={})
@@ -75,8 +91,8 @@ def test_dimension_isolation(pg_session):
     
     from smriti.models import Memory
     db = pg_session()
-    memA = Memory(id="mem384", workspace_id="w1", statement="textA")
-    memB = Memory(id="mem768", workspace_id="w1", statement="textB")
+    memA = Memory(id="mem384", workspace_id="w1", statement="textA", memory_type="fact")
+    memB = Memory(id="mem768", workspace_id="w1", statement="textB", memory_type="fact")
     db.add_all([memA, memB])
     db.commit()
 
@@ -102,7 +118,7 @@ def test_query_plan_hnsw_fallback(pg_session):
     # We must insert enough rows so postgres even considers an index
     from smriti.models import Memory
     for i in range(50):
-        db.add(Memory(id=f"plan_m_{i}", workspace_id="wplan", statement=f"text {i}"))
+        db.add(Memory(id=f"plan_m_{i}", workspace_id="wplan", statement=f"text {i}", memory_type="fact"))
     db.commit()
     for i in range(50):
         store64.upsert(f"plan_m_{i}", f"text {i}", meta={})
@@ -121,8 +137,8 @@ def test_workspace_isolation(pg_session):
     db = pg_session()
     from smriti.models import Memory
     
-    db.add(Memory(id="w1_m", workspace_id="w1", statement="secret"))
-    db.add(Memory(id="w2_m", workspace_id="w2", statement="secret"))
+    db.add(Memory(id="w1_m", workspace_id="w1", statement="secret", memory_type="fact"))
+    db.add(Memory(id="w2_m", workspace_id="w2", statement="secret", memory_type="fact"))
     db.commit()
     
     store.upsert("w1_m", "secret", meta={})
@@ -139,7 +155,7 @@ def test_concurrency(pg_session):
     db = pg_session()
     from smriti.models import Memory
     
-    db.add(Memory(id="conc_mem", workspace_id="w1", statement="conc"))
+    db.add(Memory(id="conc_mem", workspace_id="w1", statement="conc", memory_type="fact"))
     db.commit()
 
     def worker(text):
@@ -165,7 +181,7 @@ def test_hnsw_recall(pg_session):
     
     for i in range(100):
         m_id = f"m_{i}"
-        db.add(Memory(id=m_id, workspace_id="w_all", statement=f"statement {i}"))
+        db.add(Memory(id=m_id, workspace_id="w_all", statement=f"statement {i}", memory_type="fact"))
     db.commit()
     
     for i in range(100):
