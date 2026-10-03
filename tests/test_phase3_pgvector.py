@@ -269,3 +269,70 @@ def test_hnsw_recall(pg_session):
     recall = len(exact_set.intersection(approx_set)) / len(exact_set)
     # HNSW approximate recall threshold for this deterministic CI fixture
     assert recall >= 0.8
+
+def test_pgvector_upsert_session_ownership_and_autosave(pg_session):
+    db = pg_session()
+    from smriti.models import Memory
+    db.add(Memory(id="m_save_1", workspace_id="w1", statement="auto_save test", memory_type="fact"))
+    db.commit()
+
+    provider = MockEmbeddingProvider(dimension=64)
+    store = PgVectorStore(provider, pg_session)
+
+    # 1. Upsert with auto_save=False when store owns session (should persist and commit before close)
+    store.upsert("m_save_1", "auto_save test", auto_save=False)
+    db2 = pg_session()
+    row = db2.query(EmbeddingMetadata).filter_by(memory_id="m_save_1").first()
+    assert row is not None
+
+    # 2. Delete with auto_save=False when store owns session
+    store.delete("m_save_1", auto_save=False)
+    db3 = pg_session()
+    assert db3.query(EmbeddingMetadata).filter_by(memory_id="m_save_1").first() is None
+
+def test_pgvector_upsert_with_external_session_and_rebuild(pg_session):
+    db = pg_session()
+    from smriti.models import Memory
+    db.add(Memory(id="m_reb_1", workspace_id="w1", statement="rebuild 1", memory_type="fact", status="active"))
+    db.add(Memory(id="m_reb_2", workspace_id="w1", statement="rebuild 2", memory_type="fact", status="forgotten"))
+    db.commit()
+
+    provider = MockEmbeddingProvider(dimension=64)
+    store = PgVectorStore(provider, pg_session)
+
+    # rebuild_from_db passes db session and should only index non-forgotten
+    count = store.rebuild_from_db(db)
+    assert count == 1
+
+    db_check = pg_session()
+    assert db_check.query(EmbeddingMetadata).filter_by(memory_id="m_reb_1").first() is not None
+    assert db_check.query(EmbeddingMetadata).filter_by(memory_id="m_reb_2").first() is None
+
+def test_pgvector_forgotten_memory_search_exclusion(pg_session):
+    db = pg_session()
+    from smriti.models import Memory
+    db.add(Memory(id="m_act", workspace_id="w1", statement="hello world", memory_type="fact", status="active"))
+    db.add(Memory(id="m_sup", workspace_id="w1", statement="hello world", memory_type="fact", status="superseded"))
+    db.add(Memory(id="m_forg", workspace_id="w1", statement="hello world", memory_type="fact", status="forgotten"))
+    db.commit()
+
+    provider = MockEmbeddingProvider(dimension=64)
+    store = PgVectorStore(provider, pg_session)
+    store.upsert("m_act", "hello world")
+    store.upsert("m_sup", "hello world")
+    store.upsert("m_forg", "hello world")
+
+    # Default: exclude superseded and forgotten
+    res_default = store.search("hello world", filters=VectorFilter(workspace_id="w1", include_superseded=False))
+    ids_default = {r[0] for r in res_default}
+    assert "m_act" in ids_default
+    assert "m_sup" not in ids_default
+    assert "m_forg" not in ids_default
+
+    # include_superseded=True: must include superseded but NEVER forgotten
+    res_sup = store.search("hello world", filters=VectorFilter(workspace_id="w1", include_superseded=True))
+    ids_sup = {r[0] for r in res_sup}
+    assert "m_act" in ids_sup
+    assert "m_sup" in ids_sup
+    assert "m_forg" not in ids_sup
+

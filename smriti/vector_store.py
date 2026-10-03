@@ -135,6 +135,8 @@ class InMemoryVectorStore(BaseVectorStore):
                     continue
                 if not filters.include_superseded and meta.get("status") in ["superseded", "forgotten"]:
                     continue
+                elif filters.include_superseded and meta.get("status") == "forgotten":
+                    continue
 
             score = float(np.dot(q_vec, doc_vec))
             results.append((doc_id, score, meta))
@@ -183,10 +185,19 @@ class PgVectorStore(BaseVectorStore):
     def _hash(self, text: str) -> str:
         return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
-    def upsert(self, doc_id: str, text: str, meta: Optional[Dict[str, Any]] = None, auto_save: bool = True):
+    def upsert(
+        self,
+        doc_id: str,
+        text: str,
+        meta: Optional[Dict[str, Any]] = None,
+        auto_save: bool = True,
+        session: Optional[Session] = None
+    ):
         from smriti.models import EmbeddingMetadata
         from sqlalchemy.dialects.postgresql import insert
-        db = self.db_session_factory()
+
+        db = session if session is not None else self.db_session_factory()
+        should_close = session is None
         try:
             content_hash = self._hash(text)
             vec = self.embedding_provider.embed(text)
@@ -214,18 +225,33 @@ class PgVectorStore(BaseVectorStore):
 
             if auto_save:
                 db.commit()
+            elif should_close:
+                # Caller requested persistence through self-owned session; commit before close
+                db.commit()
+        except Exception:
+            db.rollback()
+            raise
         finally:
-            db.close()
+            if should_close:
+                db.close()
 
-    def delete(self, doc_id: str, auto_save: bool = True):
+    def delete(self, doc_id: str, auto_save: bool = True, session: Optional[Session] = None):
         from smriti.models import EmbeddingMetadata
-        db = self.db_session_factory()
+
+        db = session if session is not None else self.db_session_factory()
+        should_close = session is None
         try:
             db.query(EmbeddingMetadata).filter_by(memory_id=doc_id).delete()
             if auto_save:
                 db.commit()
+            elif should_close:
+                db.commit()
+        except Exception:
+            db.rollback()
+            raise
         finally:
-            db.close()
+            if should_close:
+                db.close()
 
     def search(
         self,
@@ -266,13 +292,16 @@ class PgVectorStore(BaseVectorStore):
                     params["p_id"] = filters.project_id
                 if not filters.include_superseded:
                     sql += " AND m.status NOT IN ('superseded', 'forgotten')"
-                # Enable iterative scan for HNSW when filters are present to ensure filtered rows are not omitted
-                db.execute(text("SET hnsw.iterative_scan = strict_order"))
-
-
+                else:
+                    sql += " AND m.status != 'forgotten'"
+                # Enable transaction-local iterative scan for HNSW when filters are present
+                try:
+                    db.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
+                except Exception:
+                    # Guard for pgvector versions or dialects where iterative_scan is not supported
+                    pass
 
             sql += f" ORDER BY e.embedding::vector({self.dimension}) <=> :vec LIMIT :limit"
-
 
             params["limit"] = top_k
             result = db.execute(text(sql), params).fetchall()
@@ -299,22 +328,60 @@ class PgVectorStore(BaseVectorStore):
         count = 0
         for mem in memories:
             text_str = f"{mem.statement} {mem.rationale or ''}"
-            self.upsert(mem.id, text_str, auto_save=False)
+            self.upsert(mem.id, text_str, auto_save=False, session=db)
             count += 1
         db.commit()
         return count
 
-provider_name = settings.embedding_provider
-if provider_name == "local":
-    provider = LocalEmbeddingProvider(model_name=settings.embedding_model)
-else:
-    provider = MockEmbeddingProvider()
+_provider_instance = None
+_vector_store_instance = None
 
-if engine.name == "postgresql":
-    vector_store = PgVectorStore(provider, SessionLocal)
-else:
-    vector_store = InMemoryVectorStore(provider)
+def get_embedding_provider():
+    global _provider_instance
+    if _provider_instance is None:
+        provider_name = settings.embedding_provider
+        if provider_name == "local":
+            _provider_instance = LocalEmbeddingProvider(model_name=settings.embedding_model)
+        else:
+            _provider_instance = MockEmbeddingProvider()
+    return _provider_instance
+
+def get_vector_store():
+    global _vector_store_instance
+    if _vector_store_instance is None:
+        p = get_embedding_provider()
+        if engine.name == "postgresql":
+            _vector_store_instance = PgVectorStore(p, SessionLocal)
+        else:
+            _vector_store_instance = InMemoryVectorStore(p)
+    return _vector_store_instance
+
+class _ProxyVectorStore(BaseVectorStore):
+    """Transparent proxy delegating to lazily initialized vector_store singleton."""
+    def __getattr__(self, name):
+        return getattr(get_vector_store(), name)
+
+    def __setattr__(self, name, value):
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+        else:
+            setattr(get_vector_store(), name, value)
+
+    def upsert(self, *args, **kwargs):
+        return get_vector_store().upsert(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        return get_vector_store().delete(*args, **kwargs)
+
+    def search(self, *args, **kwargs):
+        return get_vector_store().search(*args, **kwargs)
+
+    def rebuild_from_db(self, *args, **kwargs):
+        return get_vector_store().rebuild_from_db(*args, **kwargs)
+
+vector_store = _ProxyVectorStore()
 
 # Expose Phase 2 compatibility aliases
 EmbeddingService = MockEmbeddingProvider
 VectorStore = InMemoryVectorStore
+

@@ -75,16 +75,30 @@ class MockEmbeddingProvider(EmbeddingProvider):
         return self._dimension
 
 try:
-    from sentence_transformers import SentenceTransformer
+    import importlib.util
+    HAS_SENTENCE_TRANSFORMERS = importlib.util.find_spec("sentence_transformers") is not None
+except Exception:
+    HAS_SENTENCE_TRANSFORMERS = False
+
+if HAS_SENTENCE_TRANSFORMERS:
     class LocalEmbeddingProvider(EmbeddingProvider):
         def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
             self._model_name = model_name
-            self._model = SentenceTransformer(model_name)
-            self._dimension = self._model.get_sentence_embedding_dimension()
-            
+            self._model = None
+            # Standard MiniLM dimension is 384; fallback/resolved on model load
+            self._dimension = 384
+
+        def _get_model(self):
+            if self._model is None:
+                from sentence_transformers import SentenceTransformer
+                self._model = SentenceTransformer(self._model_name)
+                self._dimension = self._model.get_sentence_embedding_dimension()
+            return self._model
+
         def embed(self, text: str) -> List[float]:
+            model = self._get_model()
             # Convert to list of floats
-            return [float(x) for x in self._model.encode(text)]
+            return [float(x) for x in model.encode(text)]
 
         @property
         def model_name(self) -> str:
@@ -96,6 +110,30 @@ try:
 
         @property
         def dimension(self) -> int:
-            return self._dimension
-except ImportError:
-    pass
+            if self._model is not None:
+                return self._dimension
+            return 384
+else:
+    class LocalEmbeddingProvider(EmbeddingProvider):  # type: ignore[no-redef]
+        def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+            raise ImportError(
+                "sentence-transformers is required for LocalEmbeddingProvider. "
+                "Install it using `pip install sentence-transformers`."
+            )
+
+        def embed(self, text: str) -> List[float]:
+            raise NotImplementedError
+
+        @property
+        def model_name(self) -> str:
+            raise NotImplementedError
+
+        @property
+        def model_version(self) -> str:
+            raise NotImplementedError
+
+        @property
+        def dimension(self) -> int:
+            raise NotImplementedError
+
+

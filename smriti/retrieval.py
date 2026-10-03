@@ -88,7 +88,7 @@ class HybridRetrievalEngine:
                 if project_id:
                     mem_q = mem_q.filter(Memory.project_id == project_id)
                 mem = mem_q.first()
-                if mem and (include_superseded or mem.status not in ["superseded", "forgotten"]):
+                if mem and mem.status != "forgotten" and (include_superseded or mem.status != "superseded"):
                     results_map[key] = SearchResultItem(
                         id=mem.id,
                         type="memory",
@@ -126,7 +126,7 @@ class HybridRetrievalEngine:
                         if project_id:
                             conn_mem_q = conn_mem_q.filter(Memory.project_id == project_id)
                         conn_mem = conn_mem_q.first()
-                        if conn_mem and (include_superseded or conn_mem.status not in ["superseded", "forgotten"]):
+                        if conn_mem and conn_mem.status != "forgotten" and (include_superseded or conn_mem.status != "superseded"):
                             results_map[c_key] = SearchResultItem(
                                 id=conn_mem.id,
                                 type="memory",
