@@ -7,51 +7,41 @@ from typing import List, Dict, Any, Tuple, Optional, Callable
 from collections import Counter
 import re
 from sqlalchemy.orm import Session
+from sqlalchemy import text
+from pydantic import BaseModel
 from smriti.config import settings
+from smriti.models import engine, SessionLocal
+from smriti.embeddings import MockEmbeddingProvider, LocalEmbeddingProvider
 
-class EmbeddingService:
-    """Deterministic local vector embedding service using term-frequency and character n-gram hashing."""
+class VectorFilter(BaseModel):
+    workspace_id: Optional[str] = None
+    project_id: Optional[str] = None
+    include_superseded: bool = False
+    model_name: Optional[str] = None
+    model_version: Optional[str] = None
 
-    def __init__(self, dimension: int = 128):
-        self.dimension = dimension
+class BaseVectorStore:
+    def upsert(self, doc_id: str, text: str, meta: Optional[Dict[str, Any]] = None, auto_save: bool = True):
+        raise NotImplementedError
 
-    def _tokenize(self, text: str) -> List[str]:
-        words = re.findall(r"\w+", text.lower())
-        tokens = list(words)
-        # Add character tri-grams for subword semantic capture
-        for word in words:
-            if len(word) >= 3:
-                for i in range(len(word) - 2):
-                    tokens.append(word[i:i+3])
-        return tokens
+    def delete(self, doc_id: str, auto_save: bool = True):
+        raise NotImplementedError
 
-    def _stable_hash(self, token: str) -> int:
-        """Deterministic integer bucket index across restarts without Python hash randomization."""
-        digest = hashlib.md5(token.encode("utf-8")).hexdigest()
-        return int(digest[:8], 16) % self.dimension
+    def search(
+        self,
+        query: str,
+        top_k: int = 10,
+        filters: Optional[VectorFilter] = None,
+        filter_fn: Optional[Callable[[Dict[str, Any]], bool]] = None
+    ) -> List[Tuple[str, float, Dict[str, Any]]]:
+        raise NotImplementedError
 
-    def embed(self, text: str) -> List[float]:
-        vec = np.zeros(self.dimension, dtype=np.float32)
-        tokens = self._tokenize(text)
-        if not tokens:
-            return vec.tolist()
+    def rebuild_from_db(self, db: Session) -> int:
+        raise NotImplementedError
 
-        counts = Counter(tokens)
-        for token, count in counts.items():
-            idx = self._stable_hash(token)
-            vec[idx] += count
-
-        # L2 normalize
-        norm = np.linalg.norm(vec)
-        if norm > 0:
-            vec = vec / norm
-        return vec.tolist()
-
-class VectorStore:
-    """Persistent vector store with on-disk index serialization and full database rebuild capability."""
-
-    def __init__(self, embedding_service: EmbeddingService, storage_path: Optional[str] = None):
-        self.embedding_service = embedding_service
+class InMemoryVectorStore(BaseVectorStore):
+    def __init__(self, embedding_provider, storage_path: Optional[str] = None):
+        self.embedding_provider = embedding_provider
         self.storage_path = storage_path or os.path.join(settings.storage_dir, "vectors.json")
         self.vectors: Dict[str, np.ndarray] = {}
         self.metadata: Dict[str, Dict[str, Any]] = {}
@@ -63,7 +53,6 @@ class VectorStore:
             os.makedirs(dirname, exist_ok=True)
 
     def save(self):
-        """Persist vector index and metadata to disk atomically using a temp file."""
         self._ensure_dir()
         serialized = {
             doc_id: {
@@ -89,7 +78,6 @@ class VectorStore:
             raise
 
     def load(self):
-        """Load vector index and metadata from disk if present."""
         if os.path.exists(self.storage_path):
             try:
                 with open(self.storage_path, "r", encoding="utf-8") as f:
@@ -98,7 +86,7 @@ class VectorStore:
                     self.metadata = {}
                     for doc_id, item in data.items():
                         vec = np.array(item["vector"], dtype=np.float32)
-                        if vec.shape[0] == self.embedding_service.dimension:
+                        if vec.shape[0] == self.embedding_provider.dimension:
                             self.vectors[doc_id] = vec
                             self.metadata[doc_id] = item.get("metadata", {})
             except Exception:
@@ -109,7 +97,7 @@ class VectorStore:
             self.metadata = {}
 
     def upsert(self, doc_id: str, text: str, meta: Optional[Dict[str, Any]] = None, auto_save: bool = True):
-        vec = np.array(self.embedding_service.embed(text), dtype=np.float32)
+        vec = np.array(self.embedding_provider.embed(text), dtype=np.float32)
         self.vectors[doc_id] = vec
         self.metadata[doc_id] = meta or {}
         if auto_save:
@@ -125,18 +113,30 @@ class VectorStore:
         self,
         query: str,
         top_k: int = 10,
+        filters: Optional[VectorFilter] = None,
         filter_fn: Optional[Callable[[Dict[str, Any]], bool]] = None
     ) -> List[Tuple[str, float, Dict[str, Any]]]:
         if not self.vectors:
             return []
 
-        q_vec = np.array(self.embedding_service.embed(query), dtype=np.float32)
+        q_vec = np.array(self.embedding_provider.embed(query), dtype=np.float32)
         results = []
 
         for doc_id, doc_vec in self.vectors.items():
             meta = self.metadata.get(doc_id, {})
+
             if filter_fn and not filter_fn(meta):
                 continue
+
+            if filters:
+                if filters.workspace_id and meta.get("workspace_id") != filters.workspace_id:
+                    continue
+                if filters.project_id and meta.get("project_id") != filters.project_id:
+                    continue
+                if not filters.include_superseded and meta.get("status") in ["superseded", "forgotten"]:
+                    continue
+                elif filters.include_superseded and meta.get("status") == "forgotten":
+                    continue
 
             score = float(np.dot(q_vec, doc_vec))
             results.append((doc_id, score, meta))
@@ -150,8 +150,7 @@ class VectorStore:
         if auto_save:
             self.save()
 
-    def rebuild_from_db(self, db: Session):
-        """Rebuild the entire derived vector index from canonical database records safely using staged build."""
+    def rebuild_from_db(self, db: Session) -> int:
         from smriti.models import Memory
         eligible_memories = db.query(Memory).filter(Memory.status != "forgotten").all()
         staged_vectors: Dict[str, np.ndarray] = {}
@@ -166,16 +165,223 @@ class VectorStore:
                 "confidence": mem.confidence
             }
             text_to_embed = f"{mem.statement} {mem.rationale or ''}"
-            vec = np.array(self.embedding_service.embed(text_to_embed), dtype=np.float32)
+            vec = np.array(self.embedding_provider.embed(text_to_embed), dtype=np.float32)
             staged_vectors[mem.id] = vec
             staged_metadata[mem.id] = meta
 
-        # Only swap once all embeddings and queries succeeded
         self.vectors = staged_vectors
         self.metadata = staged_metadata
         self.save()
         return len(eligible_memories)
 
-# Global instances
-embedding_service = EmbeddingService(dimension=128)
-vector_store = VectorStore(embedding_service)
+class PgVectorStore(BaseVectorStore):
+    def __init__(self, embedding_provider, db_session_factory):
+        self.embedding_provider = embedding_provider
+        self.db_session_factory = db_session_factory
+        self.model_name = embedding_provider.model_name
+        self.model_version = embedding_provider.model_version
+        self.dimension = embedding_provider.dimension
+
+    def _hash(self, text: str) -> str:
+        return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+    def upsert(
+        self,
+        doc_id: str,
+        text: str,
+        meta: Optional[Dict[str, Any]] = None,
+        auto_save: bool = True,
+        session: Optional[Session] = None
+    ):
+        from smriti.models import EmbeddingMetadata
+        from sqlalchemy.dialects.postgresql import insert
+
+        db = session if session is not None else self.db_session_factory()
+        should_close = session is None
+        try:
+            content_hash = self._hash(text)
+            vec = self.embedding_provider.embed(text)
+
+            stmt = insert(EmbeddingMetadata).values(
+                memory_id=doc_id,
+                model_name=self.model_name,
+                model_version=self.model_version,
+                embedding_dimension=self.dimension,
+                content_hash=content_hash,
+                embedding=vec
+            ).on_conflict_do_nothing(
+                index_elements=['memory_id', 'model_name', 'model_version', 'content_hash']
+            )
+
+            db.execute(stmt)
+
+            # Clean up stale hashes atomically (if there's a new hash)
+            db.query(EmbeddingMetadata).filter(
+                EmbeddingMetadata.memory_id == doc_id,
+                EmbeddingMetadata.model_name == self.model_name,
+                EmbeddingMetadata.model_version == self.model_version,
+                EmbeddingMetadata.content_hash != content_hash
+            ).delete(synchronize_session=False)
+
+            if auto_save:
+                db.commit()
+            elif should_close:
+                # Caller requested persistence through self-owned session; commit before close
+                db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            if should_close:
+                db.close()
+
+    def delete(self, doc_id: str, auto_save: bool = True, session: Optional[Session] = None):
+        from smriti.models import EmbeddingMetadata
+
+        db = session if session is not None else self.db_session_factory()
+        should_close = session is None
+        try:
+            db.query(EmbeddingMetadata).filter_by(memory_id=doc_id).delete()
+            if auto_save:
+                db.commit()
+            elif should_close:
+                db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            if should_close:
+                db.close()
+
+    def search(
+        self,
+        query: str,
+        top_k: int = 10,
+        filters: Optional[VectorFilter] = None,
+        filter_fn: Optional[Callable[[Dict[str, Any]], bool]] = None
+    ) -> List[Tuple[str, float, Dict[str, Any]]]:
+        from smriti.models import EmbeddingMetadata, Memory
+        q_vec = self.embedding_provider.embed(query)
+        # Vector literal
+        vec_str = "[" + ",".join(map(str, q_vec)) + "]"
+
+        db = self.db_session_factory()
+        try:
+            sql = f"""
+            SELECT e.memory_id, 1 - (e.embedding::vector({self.dimension}) <=> :vec) as similarity,
+                   m.workspace_id, m.project_id, m.memory_type, m.status, m.confidence
+            FROM embedding_metadata e
+            JOIN memories m ON e.memory_id = m.id
+            WHERE e.model_name = :m_name
+              AND e.model_version = :m_version
+              AND e.embedding_dimension = :m_dim
+            """
+            params = {
+                "vec": vec_str,
+                "m_name": self.model_name,
+                "m_version": self.model_version,
+                "m_dim": self.dimension
+            }
+
+            if filters:
+                if filters.workspace_id:
+                    sql += " AND m.workspace_id = :w_id"
+                    params["w_id"] = filters.workspace_id
+                if filters.project_id:
+                    sql += " AND m.project_id = :p_id"
+                    params["p_id"] = filters.project_id
+                if not filters.include_superseded:
+                    sql += " AND m.status NOT IN ('superseded', 'forgotten')"
+                else:
+                    sql += " AND m.status != 'forgotten'"
+                # Enable transaction-local iterative scan for HNSW when filters are present
+                try:
+                    db.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
+                except Exception:
+                    # Guard for pgvector versions or dialects where iterative_scan is not supported
+                    pass
+
+            sql += f" ORDER BY e.embedding::vector({self.dimension}) <=> :vec LIMIT :limit"
+
+            params["limit"] = top_k
+            result = db.execute(text(sql), params).fetchall()
+
+            hits = []
+            for row in result:
+                meta = {
+                    "workspace_id": row.workspace_id,
+                    "project_id": row.project_id,
+                    "memory_type": row.memory_type,
+                    "status": row.status,
+                    "confidence": row.confidence
+                }
+                if filter_fn and not filter_fn(meta):
+                    continue
+                hits.append((row.memory_id, row.similarity, meta))
+            return hits
+        finally:
+            db.close()
+
+    def rebuild_from_db(self, db: Session) -> int:
+        from smriti.models import Memory
+        memories = db.query(Memory).filter(Memory.status != "forgotten").all()
+        count = 0
+        for mem in memories:
+            text_str = f"{mem.statement} {mem.rationale or ''}"
+            self.upsert(mem.id, text_str, auto_save=False, session=db)
+            count += 1
+        db.commit()
+        return count
+
+_provider_instance = None
+_vector_store_instance = None
+
+def get_embedding_provider():
+    global _provider_instance
+    if _provider_instance is None:
+        provider_name = settings.embedding_provider
+        if provider_name == "local":
+            _provider_instance = LocalEmbeddingProvider(model_name=settings.embedding_model)
+        else:
+            _provider_instance = MockEmbeddingProvider()
+    return _provider_instance
+
+def get_vector_store():
+    global _vector_store_instance
+    if _vector_store_instance is None:
+        p = get_embedding_provider()
+        if engine.name == "postgresql":
+            _vector_store_instance = PgVectorStore(p, SessionLocal)
+        else:
+            _vector_store_instance = InMemoryVectorStore(p)
+    return _vector_store_instance
+
+class _ProxyVectorStore(BaseVectorStore):
+    """Transparent proxy delegating to lazily initialized vector_store singleton."""
+    def __getattr__(self, name):
+        return getattr(get_vector_store(), name)
+
+    def __setattr__(self, name, value):
+        if name.startswith("_"):
+            super().__setattr__(name, value)
+        else:
+            setattr(get_vector_store(), name, value)
+
+    def upsert(self, *args, **kwargs):
+        return get_vector_store().upsert(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        return get_vector_store().delete(*args, **kwargs)
+
+    def search(self, *args, **kwargs):
+        return get_vector_store().search(*args, **kwargs)
+
+    def rebuild_from_db(self, *args, **kwargs):
+        return get_vector_store().rebuild_from_db(*args, **kwargs)
+
+vector_store = _ProxyVectorStore()
+
+# Expose Phase 2 compatibility aliases
+EmbeddingService = MockEmbeddingProvider
+VectorStore = InMemoryVectorStore
+
