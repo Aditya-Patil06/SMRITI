@@ -30,7 +30,7 @@ def pg_engine():
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS idx_embedding_hnsw_64 
             ON embedding_metadata 
-            USING hnsw (embedding vector_cosine_ops) 
+            USING hnsw ((embedding::vector(64)) vector_cosine_ops) 
             WHERE embedding_dimension = 64
         """))
     
