@@ -266,6 +266,8 @@ class PgVectorStore(BaseVectorStore):
                     params["p_id"] = filters.project_id
                 if not filters.include_superseded:
                     sql += " AND m.status NOT IN ('superseded', 'forgotten')"
+                # Enable iterative scan for HNSW when filters are present to ensure filtered rows are not omitted
+                db.execute(text("SET hnsw.iterative_scan = true"))
 
             sql += f" ORDER BY e.embedding::vector({self.dimension}) <=> :vec LIMIT :limit"
             params["limit"] = top_k

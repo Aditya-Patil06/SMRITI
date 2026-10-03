@@ -227,4 +227,4 @@ def test_hnsw_recall(pg_session):
     
     recall = len(exact_set.intersection(approx_set)) / len(exact_set)
     # HNSW approximate recall threshold for this deterministic CI fixture
-    assert recall >= 0.5
+    assert recall >= 0.8
