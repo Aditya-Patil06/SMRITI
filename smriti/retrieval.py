@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from smriti.models import Memory, Project, Message
 from smriti.schemas import SearchResultItem
-from smriti.vector_store import vector_store
+from smriti.vector_store import vector_store, VectorFilter
 from smriti.graph import graph_service
 
 class HybridRetrievalEngine:
@@ -69,9 +69,11 @@ class HybridRetrievalEngine:
         vec_hits = vector_store.search(
             query=query_clean,
             top_k=limit * 2,
-            filter_fn=lambda m: (not project_id or m.get("project_id") == project_id) and
-                                (not workspace_id or m.get("workspace_id") == workspace_id) and
-                                (include_superseded or m.get("status") not in ["superseded", "forgotten"])
+            filters=VectorFilter(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                include_superseded=include_superseded
+            )
         )
 
         for doc_id, sim_score, meta in vec_hits:
