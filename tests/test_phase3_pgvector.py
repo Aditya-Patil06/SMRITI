@@ -211,13 +211,42 @@ def test_hnsw_recall(pg_session):
     for i in range(100):
         store.upsert(f"m_{i}", f"statement {i}", meta={})
         
-    # Check exact recall
+    # --- Revised exact and approximate queries for reliable recall measurement ---
+    # Build the vector literal for the query embedding
+    vec = provider.embed("statement 50")
+    vec_str = "[" + ",".join(map(str, vec)) + "]"
+    sql = """
+        SELECT e.memory_id, 1 - (e.embedding::vector({dim}) <=> :vec) AS similarity
+        FROM embedding_metadata e
+        JOIN memories m ON e.memory_id = m.id
+        WHERE e.model_name = :m_name
+          AND e.model_version = :m_version
+          AND e.embedding_dimension = :m_dim
+          AND m.workspace_id = :w_id
+        ORDER BY e.embedding::vector({dim}) <=> :vec
+        LIMIT :limit
+    """.format(dim=provider.dimension)
+    params = {
+        "vec": vec_str,
+        "m_name": provider.model_name,
+        "m_version": provider.model_version,
+        "m_dim": provider.dimension,
+        "w_id": "w_all",
+        "limit": 10,
+    }
+    # Exact reference: disable index scans to force sequential scan (exact NN)
     db.execute(text("SET enable_indexscan = off"))
-    exact_res = store.search("statement 50", top_k=10, filters=VectorFilter(workspace_id="w_all"))
-    
+    db.execute(text("SET enable_seqscan = on"))
+    exact_res = db.execute(text(sql), params).fetchall()
+    # Approximate using HNSW: enable index scan and iterative scan
     db.execute(text("SET enable_indexscan = on"))
-    db.execute(text("SET enable_seqscan = off"))  # force index scan
-    approx_res = store.search("statement 50", top_k=10, filters=VectorFilter(workspace_id="w_all"))
+    db.execute(text("SET enable_seqscan = off"))
+    db.execute(text("SET hnsw.iterative_scan = strict_order"))
+    # Verify that PostgreSQL chose an Index Scan (HNSW)
+    explain_rows = db.execute(text(f"EXPLAIN {sql}"), params).fetchall()
+    explain_str = "\n".join(row[0] for row in explain_rows)
+    assert "Index Scan" in explain_str, f"Expected Index Scan in plan, got:\n{explain_str}"
+    approx_res = db.execute(text(sql), params).fetchall()
     
     exact_set = {r[0] for r in exact_res}
     approx_set = {r[0] for r in approx_res}
