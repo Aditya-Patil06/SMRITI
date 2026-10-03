@@ -269,8 +269,30 @@ class PgVectorStore(BaseVectorStore):
                 # Enable iterative scan for HNSW when filters are present to ensure filtered rows are not omitted
                 db.execute(text("SET hnsw.iterative_scan = strict_order"))
 
+
+
             sql += f" ORDER BY e.embedding::vector({self.dimension}) <=> :vec LIMIT :limit"
+
+
             params["limit"] = top_k
+            # ---- Temporary diagnostics (after LIMIT) ----
+            session_settings = {}
+            for key in ["enable_indexscan", "enable_bitmapscan", "enable_seqscan",
+                        "hnsw.iterative_scan", "hnsw.ef_search",
+                        "hnsw.max_scan_tuples", "hnsw.scan_mem_multiplier"]:
+                try:
+                    val = db.execute(text(f"SHOW {key}")).fetchone()[0]
+                except Exception as e:
+                    val = f"error: {e}"
+                session_settings[key] = val
+            print("[DIAG] PgVectorStore.search session settings:", session_settings)
+            print("[DIAG] PgVectorStore.search SQL:", sql)
+            print("[DIAG] PgVectorStore.search params:", params)
+            # Explain the query using the same session and parameters
+            explain_rows = db.execute(text(f"EXPLAIN {sql}"), params).fetchall()
+            explain_str = "\n".join(row[0] for row in explain_rows)
+            print("[DIAG] PgVectorStore.search EXPLAIN output:\n", explain_str)
+            # ---- End of temporary diagnostics ----
 
             result = db.execute(text(sql), params).fetchall()
 
