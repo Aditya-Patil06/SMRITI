@@ -132,15 +132,21 @@ def test_query_plan_hnsw_fallback(pg_session):
     # We allow the planner to use an index scan if forced
     assert "Index Scan" in explain, f"Expected Index Scan in plan, got:\\n{explain}"
 
-def test_workspace_isolation(pg_session):
+def test_workspace_isolation(pg_engine):
+    from sqlalchemy.orm import sessionmaker
+    Session = sessionmaker(bind=pg_engine)
     provider = MockEmbeddingProvider(dimension=64)
-    store = PgVectorStore(provider, pg_session)
-    db = pg_session()
-    from smriti.models import Memory, Workspace
+    store = PgVectorStore(provider, Session)
+    db = Session()
+    from smriti.models import Memory, Workspace, User
+    if not db.query(User).filter_by(id="u1").first():
+        db.add(User(id="u1", username="test"))
     
     db.add(Workspace(id="w_iso", user_id="u1", name="w_iso"))
     db.commit()
     db.add(Memory(id="w_iso_m", workspace_id="w_iso", statement="secret", memory_type="fact"))
+    if not db.query(Workspace).filter_by(id="w2").first():
+        db.add(Workspace(id="w2", user_id="u1", name="w2"))
     db.add(Memory(id="w2_m", workspace_id="w2", statement="secret", memory_type="fact"))
     db.commit()
     
