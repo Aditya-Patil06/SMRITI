@@ -42,6 +42,17 @@ def pg_engine():
         conn.execute(text("TRUNCATE TABLE embedding_metadata CASCADE"))
         conn.execute(text("TRUNCATE TABLE memories CASCADE"))
 
+@pytest.fixture(autouse=True)
+def clean_pg_tables(pg_engine):
+    """Ensure clean table state for each Phase 3 test to guarantee test isolation."""
+    with pg_engine.begin() as conn:
+        conn.execute(text("TRUNCATE TABLE embedding_metadata CASCADE"))
+        conn.execute(text("TRUNCATE TABLE memories CASCADE"))
+    yield
+    with pg_engine.begin() as conn:
+        conn.execute(text("TRUNCATE TABLE embedding_metadata CASCADE"))
+        conn.execute(text("TRUNCATE TABLE memories CASCADE"))
+
 @pytest.fixture
 def pg_session(pg_engine):
     from sqlalchemy.orm import sessionmaker
