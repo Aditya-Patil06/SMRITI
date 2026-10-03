@@ -13,7 +13,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def pg_engine():
-    db_url = os.environ.get("DATABASE_URL", "postgresql://postgres:postgrespassword@localhost:5432/smriti_test")
+    db_url = os.environ.get("SMRITI_DATABASE_URL", "postgresql://postgres:postgrespassword@localhost:5432/smriti_test")
     engine = create_engine(db_url)
     
     with engine.begin() as conn:
