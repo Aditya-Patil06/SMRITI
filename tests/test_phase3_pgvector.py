@@ -110,7 +110,7 @@ def test_query_plan_hnsw_fallback(pg_session):
     # Force index usage by turning off seqscan
     db.execute(text("SET enable_seqscan = off;"))
     
-    explain = db.execute(text(f"EXPLAIN SELECT e.memory_id FROM embedding_metadata e WHERE e.embedding_dimension = 64 ORDER BY e.embedding <=> '{vec_str}' LIMIT 10")).scalar()
+    explain = db.execute(text(f"EXPLAIN SELECT e.memory_id FROM embedding_metadata e WHERE e.embedding_dimension = 64 ORDER BY e.embedding::vector(64) <=> '{vec_str}' LIMIT 10")).scalar()
     
     # We allow the planner to use an index scan if forced
     assert "Index Scan" in explain, f"Expected Index Scan in plan, got:\\n{explain}"
