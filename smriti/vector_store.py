@@ -267,7 +267,7 @@ class PgVectorStore(BaseVectorStore):
                 if not filters.include_superseded:
                     sql += " AND m.status NOT IN ('superseded', 'forgotten')"
 
-            sql += " ORDER BY e.embedding::vector({self.dimension}) <=> :vec LIMIT :limit"
+            sql += f" ORDER BY e.embedding::vector({self.dimension}) <=> :vec LIMIT :limit"
             params["limit"] = top_k
 
             result = db.execute(text(sql), params).fetchall()
