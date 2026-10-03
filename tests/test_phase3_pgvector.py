@@ -49,7 +49,7 @@ def pg_session(pg_engine):
     db = Session()
     
     if not db.query(User).filter_by(id="u1").first():
-        db.add(User(id="u1", email="test@test.com", password_hash="hash"))
+        db.add(User(id="u1", email="test@test.com", username="test"))
         db.commit()
         
     for w_id in ["w1", "w2", "wplan", "w_all"]:
