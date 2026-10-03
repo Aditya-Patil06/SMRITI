@@ -242,7 +242,7 @@ class PgVectorStore(BaseVectorStore):
         db = self.db_session_factory()
         try:
             sql = f"""
-            SELECT e.memory_id, 1 - (e.embedding <=> :vec) as similarity,
+            SELECT e.memory_id, 1 - (e.embedding::vector({self.dimension}) <=> :vec) as similarity,
                    m.workspace_id, m.project_id, m.memory_type, m.status, m.confidence
             FROM embedding_metadata e
             JOIN memories m ON e.memory_id = m.id
@@ -267,7 +267,7 @@ class PgVectorStore(BaseVectorStore):
                 if not filters.include_superseded:
                     sql += " AND m.status NOT IN ('superseded', 'forgotten')"
 
-            sql += " ORDER BY e.embedding <=> :vec LIMIT :limit"
+            sql += " ORDER BY e.embedding::vector({self.dimension}) <=> :vec LIMIT :limit"
             params["limit"] = top_k
 
             result = db.execute(text(sql), params).fetchall()
