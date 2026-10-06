@@ -50,7 +50,7 @@ def test_in_memory_vector_store_filtering(tmp_path):
     f_super = VectorFilter(workspace_id="ws1", include_superseded=True)
     res_super = store.search("apple", top_k=10, filters=f_super)
     assert len(res_super) == 2
-    assert {"mem1", "mem3"} == {r[0] for r in res_super}
+    assert {r[0] for r in res_super} == {"mem1", "mem3"}
     assert "mem4" not in {r[0] for r in res_super}
 
 def test_local_embedding_provider_defined():
@@ -87,7 +87,6 @@ def test_local_embedding_provider():
     try:
         provider = LocalEmbeddingProvider(model_name="all-MiniLM-L6-v2")
         v = provider.embed("test")
-        assert len(v) == 384
     except Exception:
         pytest.skip("Local embedding provider failing/not installed")
-
+    assert len(v) == 384

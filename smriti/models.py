@@ -19,6 +19,7 @@ from smriti.config import settings
 Base = declarative_base()
 
 PROJECT_FK = "projects.id"
+MEMORIES_FK = "memories.id"
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -131,7 +132,7 @@ class Milestone(Base):
     title = Column(String(256), nullable=False)
     description = Column(Text, nullable=True)
     milestone_type = Column(String(64), nullable=False)  # project_created, architecture_decided, technology_selected, feature_completed, phase_completed
-    evidence_memory_id = Column(String(64), ForeignKey("memories.id"), nullable=True)
+    evidence_memory_id = Column(String(64), ForeignKey(MEMORIES_FK), nullable=True)
     reached_at = Column(DateTime, default=utcnow)
     created_at = Column(DateTime, default=utcnow)
 
@@ -172,7 +173,7 @@ class Memory(Base):
 class MemoryVersion(Base):
     __tablename__ = "memory_versions"
     id = Column(String(64), primary_key=True, default=generate_uuid)
-    memory_id = Column(String(64), ForeignKey("memories.id"), nullable=False)
+    memory_id = Column(String(64), ForeignKey(MEMORIES_FK), nullable=False)
     version_number = Column(Float, nullable=False)
     statement = Column(Text, nullable=False)
     rationale = Column(Text, nullable=True)
@@ -220,7 +221,7 @@ class VectorType(TypeDecorator):
 class EmbeddingMetadata(Base):
     __tablename__ = "embedding_metadata"
     id = Column(String(64), primary_key=True, default=generate_uuid)
-    memory_id = Column(String(64), ForeignKey("memories.id", ondelete="CASCADE"), nullable=False)
+    memory_id = Column(String(64), ForeignKey(MEMORIES_FK, ondelete="CASCADE"), nullable=False)
     model_name = Column(String(128), nullable=False)
     model_version = Column(String(64), nullable=False)
     embedding_dimension = Column(Integer, nullable=False)

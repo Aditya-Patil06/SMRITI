@@ -109,6 +109,19 @@ class InMemoryVectorStore(BaseVectorStore):
         if auto_save:
             self.save()
 
+    def _matches_filters(self, meta: Dict[str, Any], filters: Optional[VectorFilter]) -> bool:
+        """Check if metadata satisfies the given VectorFilter."""
+        if not filters:
+            return True
+        if filters.workspace_id and meta.get("workspace_id") != filters.workspace_id:
+            return False
+        if filters.project_id and meta.get("project_id") != filters.project_id:
+            return False
+        status = meta.get("status")
+        if status == "forgotten" or (not filters.include_superseded and status == "superseded"):
+            return False
+        return True
+
     def search(
         self,
         query: str,
@@ -128,15 +141,8 @@ class InMemoryVectorStore(BaseVectorStore):
             if filter_fn and not filter_fn(meta):
                 continue
 
-            if filters:
-                if filters.workspace_id and meta.get("workspace_id") != filters.workspace_id:
-                    continue
-                if filters.project_id and meta.get("project_id") != filters.project_id:
-                    continue
-                if not filters.include_superseded and meta.get("status") in ["superseded", "forgotten"]:
-                    continue
-                elif filters.include_superseded and meta.get("status") == "forgotten":
-                    continue
+            if not self._matches_filters(meta, filters):
+                continue
 
             score = float(np.dot(q_vec, doc_vec))
             results.append((doc_id, score, meta))
@@ -175,12 +181,15 @@ class InMemoryVectorStore(BaseVectorStore):
         return len(eligible_memories)
 
 class PgVectorStore(BaseVectorStore):
-    def __init__(self, embedding_provider, db_session_factory):
+    def __init__(self, embedding_provider, db_session_factory, storage_path: Optional[str] = None):
         self.embedding_provider = embedding_provider
         self.db_session_factory = db_session_factory
         self.model_name = embedding_provider.model_name
         self.model_version = embedding_provider.model_version
         self.dimension = embedding_provider.dimension
+        self.storage_path = storage_path or os.path.join(settings.storage_dir, "vectors.json")
+        self.vectors: Dict[str, np.ndarray] = {}
+        self.metadata: Dict[str, Dict[str, Any]] = {}
 
     def _hash(self, text: str) -> str:
         return hashlib.sha256(text.encode('utf-8')).hexdigest()
@@ -196,11 +205,15 @@ class PgVectorStore(BaseVectorStore):
         from smriti.models import EmbeddingMetadata
         from sqlalchemy.dialects.postgresql import insert
 
+        # Maintain in-memory compatibility mirrors
+        vec = self.embedding_provider.embed(text)
+        self.vectors[doc_id] = np.array(vec, dtype=np.float32)
+        self.metadata[doc_id] = meta or {}
+
         db = session if session is not None else self.db_session_factory()
         should_close = session is None
         try:
             content_hash = self._hash(text)
-            vec = self.embedding_provider.embed(text)
 
             stmt = insert(EmbeddingMetadata).values(
                 memory_id=doc_id,
@@ -223,10 +236,7 @@ class PgVectorStore(BaseVectorStore):
                 EmbeddingMetadata.content_hash != content_hash
             ).delete(synchronize_session=False)
 
-            if auto_save:
-                db.commit()
-            elif should_close:
-                # Caller requested persistence through self-owned session; commit before close
+            if auto_save or should_close:
                 db.commit()
         except Exception:
             db.rollback()
@@ -238,13 +248,14 @@ class PgVectorStore(BaseVectorStore):
     def delete(self, doc_id: str, auto_save: bool = True, session: Optional[Session] = None):
         from smriti.models import EmbeddingMetadata
 
+        self.vectors.pop(doc_id, None)
+        self.metadata.pop(doc_id, None)
+
         db = session if session is not None else self.db_session_factory()
         should_close = session is None
         try:
             db.query(EmbeddingMetadata).filter_by(memory_id=doc_id).delete()
-            if auto_save:
-                db.commit()
-            elif should_close:
+            if auto_save or should_close:
                 db.commit()
         except Exception:
             db.rollback()
@@ -253,6 +264,52 @@ class PgVectorStore(BaseVectorStore):
             if should_close:
                 db.close()
 
+    def save(self):
+        """No-op on PostgreSQL as persistence is transactional in the database."""
+        pass
+
+    def clear(self, auto_save: bool = True):
+        self.vectors.clear()
+        self.metadata.clear()
+
+    def _build_search_filters(self, filters: Optional[VectorFilter], params: Dict[str, Any]) -> str:
+        """Construct WHERE filter clauses and bind parameters for vector search."""
+        if not filters:
+            return ""
+
+        clause = ""
+        if filters.workspace_id:
+            clause += " AND m.workspace_id = :w_id"
+            params["w_id"] = filters.workspace_id
+        if filters.project_id:
+            clause += " AND m.project_id = :p_id"
+            params["p_id"] = filters.project_id
+        if not filters.include_superseded:
+            clause += " AND m.status NOT IN ('superseded', 'forgotten')"
+        else:
+            clause += " AND m.status != 'forgotten'"
+        return clause
+
+    def _format_hits(
+        self,
+        result: List[Any],
+        filter_fn: Optional[Callable[[Dict[str, Any]], bool]] = None
+    ) -> List[Tuple[str, float, Dict[str, Any]]]:
+        """Convert raw database rows to hit tuples, applying post-filtering if provided."""
+        hits: List[Tuple[str, float, Dict[str, Any]]] = []
+        for row in result:
+            meta = {
+                "workspace_id": row.workspace_id,
+                "project_id": row.project_id,
+                "memory_type": row.memory_type,
+                "status": row.status,
+                "confidence": row.confidence
+            }
+            if filter_fn and not filter_fn(meta):
+                continue
+            hits.append((row.memory_id, row.similarity, meta))
+        return hits
+
     def search(
         self,
         query: str,
@@ -260,40 +317,21 @@ class PgVectorStore(BaseVectorStore):
         filters: Optional[VectorFilter] = None,
         filter_fn: Optional[Callable[[Dict[str, Any]], bool]] = None
     ) -> List[Tuple[str, float, Dict[str, Any]]]:
-        from smriti.models import EmbeddingMetadata, Memory
         q_vec = self.embedding_provider.embed(query)
         # Vector literal
         vec_str = "[" + ",".join(map(str, q_vec)) + "]"
 
         db = self.db_session_factory()
         try:
-            sql = f"""
-            SELECT e.memory_id, 1 - (e.embedding::vector({self.dimension}) <=> :vec) as similarity,
-                   m.workspace_id, m.project_id, m.memory_type, m.status, m.confidence
-            FROM embedding_metadata e
-            JOIN memories m ON e.memory_id = m.id
-            WHERE e.model_name = :m_name
-              AND e.model_version = :m_version
-              AND e.embedding_dimension = :m_dim
-            """
-            params = {
+            params: Dict[str, Any] = {
                 "vec": vec_str,
                 "m_name": self.model_name,
                 "m_version": self.model_version,
                 "m_dim": self.dimension
             }
 
+            filter_clauses = self._build_search_filters(filters, params)
             if filters:
-                if filters.workspace_id:
-                    sql += " AND m.workspace_id = :w_id"
-                    params["w_id"] = filters.workspace_id
-                if filters.project_id:
-                    sql += " AND m.project_id = :p_id"
-                    params["p_id"] = filters.project_id
-                if not filters.include_superseded:
-                    sql += " AND m.status NOT IN ('superseded', 'forgotten')"
-                else:
-                    sql += " AND m.status != 'forgotten'"
                 # Enable transaction-local iterative scan for HNSW when filters are present
                 try:
                     db.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
@@ -301,24 +339,20 @@ class PgVectorStore(BaseVectorStore):
                     # Guard for pgvector versions or dialects where iterative_scan is not supported
                     pass
 
-            sql += f" ORDER BY e.embedding::vector({self.dimension}) <=> :vec LIMIT :limit"
+            sql = f"""
+            SELECT e.memory_id, 1 - (e.embedding::vector({self.dimension}) <=> :vec) as similarity,
+                   m.workspace_id, m.project_id, m.memory_type, m.status, m.confidence
+            FROM embedding_metadata e
+            JOIN memories m ON e.memory_id = m.id
+            WHERE e.model_name = :m_name
+              AND e.model_version = :m_version
+              AND e.embedding_dimension = :m_dim{filter_clauses}
+            ORDER BY e.embedding::vector({self.dimension}) <=> :vec LIMIT :limit
+            """
 
             params["limit"] = top_k
             result = db.execute(text(sql), params).fetchall()
-
-            hits = []
-            for row in result:
-                meta = {
-                    "workspace_id": row.workspace_id,
-                    "project_id": row.project_id,
-                    "memory_type": row.memory_type,
-                    "status": row.status,
-                    "confidence": row.confidence
-                }
-                if filter_fn and not filter_fn(meta):
-                    continue
-                hits.append((row.memory_id, row.similarity, meta))
-            return hits
+            return self._format_hits(result, filter_fn)
         finally:
             db.close()
 
