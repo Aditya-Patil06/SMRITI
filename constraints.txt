@@ -142,8 +142,10 @@ pgvector==0.5.0
     # via project-smriti (pyproject.toml)
 pluggy==1.6.0
     # via pytest
-psycopg2-binary==2.9.13
+psycopg==3.3.6
     # via project-smriti (pyproject.toml)
+psycopg-binary==3.3.6
+    # via psycopg
 pydantic==2.13.5
     # via
     #   project-smriti (pyproject.toml)
@@ -222,6 +224,7 @@ typing-extensions==4.16.0
     #   fastapi
     #   huggingface-hub
     #   opentelemetry-api
+    #   psycopg
     #   pydantic
     #   pydantic-core
     #   pytest-asyncio
