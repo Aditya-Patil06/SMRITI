@@ -58,28 +58,40 @@ def test_local_embedding_provider_defined():
     assert issubclass(LocalEmbeddingProvider, object)
 
 def test_local_embedding_provider_fallback_import_error(monkeypatch):
-    import smriti.embeddings as emb_mod
-    # Test that fallback class raises ImportError when sentence_transformers is absent
-    # We test the fallback class directly or simulate its branch
-    from smriti.embeddings import EmbeddingProvider
+    import sys
+    import importlib
+    import smriti.embeddings
+    import smriti.vector_store
 
-    class FallbackLocal(EmbeddingProvider):
-        def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-            raise ImportError(
-                "sentence-transformers is required for LocalEmbeddingProvider. "
-                "Install it using `pip install sentence-transformers`."
-            )
-        def embed(self, text: str): raise NotImplementedError
-        @property
-        def model_name(self) -> str: raise NotImplementedError
-        @property
-        def model_version(self) -> str: raise NotImplementedError
-        @property
-        def dimension(self) -> int: raise NotImplementedError
+    orig_emb = sys.modules.get("smriti.embeddings")
+    orig_provider_emb = getattr(smriti.embeddings, "LocalEmbeddingProvider", None)
+    orig_provider_vec = getattr(smriti.vector_store, "LocalEmbeddingProvider", None)
 
-    with pytest.raises(ImportError) as exc_info:
-        FallbackLocal()
-    assert "sentence-transformers is required" in str(exc_info.value)
+    # Simulate absence of sentence_transformers in importlib
+    orig_find_spec = importlib.util.find_spec
+
+    def mock_find_spec(name, *args, **kwargs):
+        if name == "sentence_transformers":
+            return None
+        return orig_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", mock_find_spec)
+
+    try:
+        # Reload smriti.embeddings so the HAS_SENTENCE_TRANSFORMERS=False branch executes
+        reloaded_emb = importlib.reload(smriti.embeddings)
+        with pytest.raises(ImportError) as exc_info:
+            reloaded_emb.LocalEmbeddingProvider()
+        assert "sentence-transformers is required" in str(exc_info.value)
+    finally:
+        # Restore monkeypatch and reload module cleanly to restore original classes
+        monkeypatch.undo()
+        if orig_emb is not None:
+            importlib.reload(orig_emb)
+        if orig_provider_emb is not None:
+            smriti.embeddings.LocalEmbeddingProvider = orig_provider_emb
+        if orig_provider_vec is not None:
+            smriti.vector_store.LocalEmbeddingProvider = orig_provider_vec
 
 @pytest.mark.skip(reason="Requires network access and HuggingFace models")
 def test_local_embedding_provider():

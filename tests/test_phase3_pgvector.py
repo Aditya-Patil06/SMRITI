@@ -209,6 +209,44 @@ def test_concurrency(pg_engine):
     
     assert len(records) == 1
 
+def test_concurrency_different_text_same_memory(pg_engine):
+    from sqlalchemy.orm import sessionmaker
+    Session = sessionmaker(bind=pg_engine)
+    provider = MockEmbeddingProvider(dimension=64)
+    store = PgVectorStore(provider, Session)
+    db = Session()
+    from smriti.models import Memory, Workspace, User
+
+    if not db.query(User).filter_by(id="u1").first():
+        db.add(User(id="u1", email="test@test.com", username="test"))
+    if not db.query(Workspace).filter_by(id="w_diff").first():
+        db.add(Workspace(id="w_diff", user_id="u1", name="Diff Text Conc"))
+    db.commit()
+
+    db.add(Memory(id="conc_diff_mem", workspace_id="w_diff", statement="initial", memory_type="fact"))
+    db.commit()
+
+    def worker(i):
+        store.upsert("conc_diff_mem", f"concurrent distinct statement {i}", meta={})
+
+    threads = []
+    for i in range(10):
+        t = threading.Thread(target=worker, args=(i,))
+        threads.append(t)
+        t.start()
+
+    for t in threads:
+        t.join()
+
+    records = db.query(EmbeddingMetadata).filter_by(memory_id="conc_diff_mem").all()
+    assert len(records) == 1
+
+    # Verify search does not return duplicate results
+    hits = store.search("concurrent distinct statement", top_k=10, filters=VectorFilter(workspace_id="w_diff"))
+    assert len(hits) == 1
+    assert hits[0][0] == "conc_diff_mem"
+    db.close()
+
 def test_hnsw_recall(pg_session):
     provider = MockEmbeddingProvider(dimension=64)
     store = PgVectorStore(provider, pg_session)

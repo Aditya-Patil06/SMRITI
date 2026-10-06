@@ -213,6 +213,10 @@ class PgVectorStore(BaseVectorStore):
         db = session if session is not None else self.db_session_factory()
         should_close = session is None
         try:
+            # Row-level lock on parent Memory for doc_id to synchronize concurrent upserts
+            from smriti.models import Memory
+            db.query(Memory).filter_by(id=doc_id).with_for_update().first()
+
             content_hash = self._hash(text)
 
             stmt = insert(EmbeddingMetadata).values(

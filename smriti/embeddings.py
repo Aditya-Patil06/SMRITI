@@ -85,8 +85,7 @@ if HAS_SENTENCE_TRANSFORMERS:
         def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
             self._model_name = model_name
             self._model = None
-            # Standard MiniLM dimension is 384; fallback/resolved on model load
-            self._dimension = 384
+            self._dimension = None
 
         def _get_model(self):
             if self._model is None:
@@ -110,9 +109,9 @@ if HAS_SENTENCE_TRANSFORMERS:
 
         @property
         def dimension(self) -> int:
-            if self._model is not None:
-                return self._dimension
-            return 384
+            if self._dimension is None:
+                self._get_model()
+            return self._dimension
 else:
     class LocalEmbeddingProvider(EmbeddingProvider):  # type: ignore[no-redef]
         def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
