@@ -5,7 +5,7 @@ Revises: c2b49b035a68
 Create Date: 2026-10-03 13:13:18.436280
 
 """
-from typing import Sequence, Union
+from typing import Sequence
 
 from alembic import op
 import sqlalchemy as sa
@@ -20,9 +20,9 @@ except ImportError:
 
 # revision identifiers, used by Alembic.
 revision: str = '5032740e5b4c'
-down_revision: Union[str, Sequence[str], None] = 'c2b49b035a68'
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = 'c2b49b035a68'
+branch_labels: Sequence[str] | None = None
+depends_on: Sequence[str] | None = None
 
 
 def upgrade() -> None:

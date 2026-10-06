@@ -275,6 +275,8 @@ class PgVectorStore(BaseVectorStore):
     def clear(self, auto_save: bool = True):
         self.vectors.clear()
         self.metadata.clear()
+        if auto_save:
+            self.save()
 
     def _build_search_filters(self, filters: Optional[VectorFilter], params: Dict[str, Any]) -> str:
         """Construct WHERE filter clauses and bind parameters for vector search."""
