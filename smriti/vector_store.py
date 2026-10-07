@@ -345,6 +345,10 @@ class PgVectorStore(BaseVectorStore):
                     # Guard for pgvector versions or dialects where iterative_scan is not supported
                     pass
 
+            limit_clause = " LIMIT :limit" if filter_fn is None else ""
+            if filter_fn is None:
+                params["limit"] = top_k
+
             sql = f"""
             SELECT e.memory_id, 1 - (e.embedding::vector({self.dimension}) <=> :vec) as similarity,
                    m.workspace_id, m.project_id, m.memory_type, m.status, m.confidence
@@ -353,12 +357,12 @@ class PgVectorStore(BaseVectorStore):
             WHERE e.model_name = :m_name
               AND e.model_version = :m_version
               AND e.embedding_dimension = :m_dim{filter_clauses}
-            ORDER BY e.embedding::vector({self.dimension}) <=> :vec LIMIT :limit
+            ORDER BY e.embedding::vector({self.dimension}) <=> :vec{limit_clause}
             """
 
-            params["limit"] = top_k
             result = db.execute(text(sql), params).fetchall()
-            return self._format_hits(result, filter_fn)
+            hits = self._format_hits(result, filter_fn)
+            return hits[:top_k]
         finally:
             db.close()
 

@@ -374,3 +374,49 @@ def test_pgvector_forgotten_memory_search_exclusion(pg_session):
     assert "m_sup" in ids_sup
     assert "m_forg" not in ids_sup
 
+
+def test_search_filter_fn_does_not_starve_candidates_beyond_sql_limit(pg_session):
+    db = pg_session()
+    from smriti.models import Memory, Workspace, User
+    if not db.query(User).filter_by(id="u1").first():
+        db.add(User(id="u1", email="test@test.com", username="test"))
+    if not db.query(Workspace).filter_by(id="w_filt").first():
+        db.add(Workspace(id="w_filt", user_id="u1", name="Filt Workspace"))
+    db.commit()
+
+    # Three memories:
+    # m_rej_1 and m_rej_2 have high textual similarity ("apple banana cherry") but memory_type="scratchpad"
+    # m_acc has slightly lower overlap ("apple dog elephant") but memory_type="decision"
+    db.add(Memory(id="m_rej_1", workspace_id="w_filt", statement="apple banana cherry", memory_type="scratchpad", status="active"))
+    db.add(Memory(id="m_rej_2", workspace_id="w_filt", statement="apple banana cherry", memory_type="scratchpad", status="active"))
+    db.add(Memory(id="m_acc", workspace_id="w_filt", statement="apple dog elephant", memory_type="decision", status="active"))
+    db.commit()
+
+    provider = MockEmbeddingProvider(dimension=64)
+    store = PgVectorStore(provider, pg_session)
+    store.upsert("m_rej_1", "apple banana cherry")
+    store.upsert("m_rej_2", "apple banana cherry")
+    store.upsert("m_acc", "apple dog elephant")
+
+    # Baseline: without filter_fn, top_k=2 returns the two scratchpad memories
+    base_hits = store.search("apple banana cherry", top_k=2, filters=VectorFilter(workspace_id="w_filt"))
+    assert len(base_hits) == 2
+    base_ids = [h[0] for h in base_hits]
+    assert "m_rej_1" in base_ids
+    assert "m_rej_2" in base_ids
+    assert "m_acc" not in base_ids
+
+    # With filter_fn selecting only "decision" memories:
+    # If SQL LIMIT 2 was applied before filter_fn, m_acc would be starved and hits would be empty.
+    # With the fix, m_acc is evaluated and returned.
+    hits = store.search(
+        "apple banana cherry",
+        top_k=2,
+        filters=VectorFilter(workspace_id="w_filt"),
+        filter_fn=lambda m: m.get("memory_type") == "decision",
+    )
+    assert len(hits) == 1
+    assert hits[0][0] == "m_acc"
+    assert len(hits) <= 2
+
+
