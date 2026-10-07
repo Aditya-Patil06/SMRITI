@@ -316,6 +316,33 @@ class PgVectorStore(BaseVectorStore):
             hits.append((row.memory_id, row.similarity, meta))
         return hits
 
+    def _stream_filtered_hits(
+        self,
+        cursor: Any,
+        top_k: int,
+        filter_fn: Callable[[Dict[str, Any]], bool]
+    ) -> List[Tuple[str, float, Dict[str, Any]]]:
+        """Stream candidates in bounded batches when filter_fn is present to avoid fetching all candidates."""
+        batch_size = max(top_k * 2, 50)
+        hits: List[Tuple[str, float, Dict[str, Any]]] = []
+        while len(hits) < top_k:
+            batch = cursor.fetchmany(batch_size)
+            if not batch:
+                break
+            for row in batch:
+                meta = {
+                    "workspace_id": row.workspace_id,
+                    "project_id": row.project_id,
+                    "memory_type": row.memory_type,
+                    "status": row.status,
+                    "confidence": row.confidence
+                }
+                if filter_fn(meta):
+                    hits.append((row.memory_id, row.similarity, meta))
+                    if len(hits) == top_k:
+                        break
+        return hits
+
     def search(
         self,
         query: str,
@@ -365,27 +392,7 @@ class PgVectorStore(BaseVectorStore):
                 if filter_fn is None:
                     result = cursor.fetchall()
                     return self._format_hits(result, None)
-
-                # Stream candidates in bounded batches when filter_fn is present to avoid fetching all candidates
-                batch_size = max(top_k * 2, 50)
-                hits: List[Tuple[str, float, Dict[str, Any]]] = []
-                while len(hits) < top_k:
-                    batch = cursor.fetchmany(batch_size)
-                    if not batch:
-                        break
-                    for row in batch:
-                        meta = {
-                            "workspace_id": row.workspace_id,
-                            "project_id": row.project_id,
-                            "memory_type": row.memory_type,
-                            "status": row.status,
-                            "confidence": row.confidence
-                        }
-                        if filter_fn(meta):
-                            hits.append((row.memory_id, row.similarity, meta))
-                            if len(hits) == top_k:
-                                break
-                return hits
+                return self._stream_filtered_hits(cursor, top_k, filter_fn)
             finally:
                 cursor.close()
         finally:
