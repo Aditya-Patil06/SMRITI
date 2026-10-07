@@ -360,9 +360,34 @@ class PgVectorStore(BaseVectorStore):
             ORDER BY e.embedding::vector({self.dimension}) <=> :vec{limit_clause}
             """
 
-            result = db.execute(text(sql), params).fetchall()
-            hits = self._format_hits(result, filter_fn)
-            return hits[:top_k]
+            cursor = db.execute(text(sql), params)
+            try:
+                if filter_fn is None:
+                    result = cursor.fetchall()
+                    return self._format_hits(result, None)
+
+                # Stream candidates in bounded batches when filter_fn is present to avoid fetching all candidates
+                batch_size = max(top_k * 2, 50)
+                hits: List[Tuple[str, float, Dict[str, Any]]] = []
+                while len(hits) < top_k:
+                    batch = cursor.fetchmany(batch_size)
+                    if not batch:
+                        break
+                    for row in batch:
+                        meta = {
+                            "workspace_id": row.workspace_id,
+                            "project_id": row.project_id,
+                            "memory_type": row.memory_type,
+                            "status": row.status,
+                            "confidence": row.confidence
+                        }
+                        if filter_fn(meta):
+                            hits.append((row.memory_id, row.similarity, meta))
+                            if len(hits) == top_k:
+                                break
+                return hits
+            finally:
+                cursor.close()
         finally:
             db.close()
 

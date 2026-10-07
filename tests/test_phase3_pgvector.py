@@ -420,3 +420,91 @@ def test_search_filter_fn_does_not_starve_candidates_beyond_sql_limit(pg_session
     assert len(hits) <= 2
 
 
+def test_search_filter_fn_batches_and_stops_at_top_k(pg_session, monkeypatch):
+    db = pg_session()
+    from smriti.models import Memory, Workspace, User
+    if not db.query(User).filter_by(id="u1").first():
+        db.add(User(id="u1", email="test@test.com", username="test"))
+    if not db.query(Workspace).filter_by(id="w_batch").first():
+        db.add(Workspace(id="w_batch", user_id="u1", name="Batch Workspace"))
+    db.commit()
+
+    # Create 15 memories:
+    # First 12 are "noise" (memory_type="scratchpad")
+    # Next 3 are "match" (memory_type="decision")
+    for i in range(12):
+        db.add(Memory(id=f"m_noise_{i}", workspace_id="w_batch", statement=f"statement common {i}", memory_type="scratchpad", status="active"))
+    for i in range(3):
+        db.add(Memory(id=f"m_match_{i}", workspace_id="w_batch", statement=f"statement common extra {i}", memory_type="decision", status="active"))
+    db.commit()
+
+    provider = MockEmbeddingProvider(dimension=64)
+    store = PgVectorStore(provider, pg_session)
+    for i in range(12):
+        store.upsert(f"m_noise_{i}", f"statement common {i}")
+    for i in range(3):
+        store.upsert(f"m_match_{i}", f"statement common extra {i}")
+
+    # Set batch_size artificially small to 5 to verify cross-batch iteration and early stopping
+    from sqlalchemy.engine import CursorResult
+    orig_fetchmany = CursorResult.fetchmany
+    fetchmany_calls = []
+
+    def tracking_fetchmany(self, size=None):
+        fetchmany_calls.append(size)
+        return orig_fetchmany(self, size)
+
+    monkeypatch.setattr(CursorResult, "fetchmany", tracking_fetchmany)
+
+    evaluated_metas = []
+    def custom_filter(meta):
+        evaluated_metas.append(meta)
+        return meta.get("memory_type") == "decision"
+
+    # top_k=2 with batch_size=5 (max(2*2, 5) -> batch_size=50 in production, but let's test with top_k=2)
+    # The first batch (or batches) will contain m_noise. Eligible candidates are beyond the initial items.
+    hits = store.search(
+        "statement common",
+        top_k=2,
+        filters=VectorFilter(workspace_id="w_batch"),
+        filter_fn=custom_filter,
+    )
+
+    # 1. Stops after collecting top_k accepted candidates (top_k=2)
+    assert len(hits) == 2
+    for mem_id, sim, meta in hits:
+        assert meta["memory_type"] == "decision"
+
+    # 2. Existing filter_fn semantics remain correct
+    assert all(h[2]["memory_type"] == "decision" for h in hits)
+    # 3. Only needed candidates were accepted, the 3rd match was never appended
+    assert len([m for m in evaluated_metas if m.get("memory_type") == "decision"]) == 2
+
+
+def test_search_filter_fn_none_retains_sql_limit(pg_session, monkeypatch):
+    provider = MockEmbeddingProvider(dimension=64)
+    store = PgVectorStore(provider, pg_session)
+
+    executed_sqls = []
+    executed_params = []
+
+    from sqlalchemy.orm import Session as SASession
+    orig_execute = SASession.execute
+
+    def tracking_execute(self, statement, params=None, **kwargs):
+        executed_sqls.append(str(statement))
+        executed_params.append(params)
+        return orig_execute(self, statement, params, **kwargs)
+
+    monkeypatch.setattr(SASession, "execute", tracking_execute)
+
+    store.search("test query", top_k=7, filter_fn=None)
+
+    # Verify SQL query contains LIMIT :limit and params has limit=7
+    matching_query = [
+        (sql, p) for sql, p in zip(executed_sqls, executed_params)
+        if "LIMIT :limit" in sql and p and p.get("limit") == 7
+    ]
+    assert len(matching_query) == 1
+
+
