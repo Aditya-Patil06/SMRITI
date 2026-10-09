@@ -102,3 +102,63 @@ def test_local_embedding_provider():
     except Exception:
         pytest.skip("Local embedding provider failing/not installed")
     assert len(v) == 384
+
+
+def test_pgvector_search_sql_pagination_unit():
+    from unittest.mock import MagicMock
+    from collections import namedtuple
+    from smriti.vector_store import PgVectorStore, VectorFilter
+
+    mock_session = MagicMock()
+    mock_cursor_p1 = MagicMock()
+    mock_cursor_p2 = MagicMock()
+
+    Row = namedtuple("Row", ["memory_id", "similarity", "workspace_id", "project_id", "memory_type", "status", "confidence"])
+    # Page 1: 50 noise items
+    page1_rows = [Row(f"noise_{i:03d}", 0.95 - (i * 0.001), "ws1", None, "scratchpad", "active", 0.9) for i in range(50)]
+    # Page 2: 3 matches and 47 noise items
+    page2_rows = [
+        Row("acc_001", 0.89, "ws1", None, "decision", "active", 0.9),
+        Row("acc_002", 0.88, "ws1", None, "decision", "active", 0.9),
+        Row("acc_003", 0.87, "ws1", None, "decision", "active", 0.9),
+    ] + [Row(f"noise_p2_{i:03d}", 0.85 - (i * 0.001), "ws1", None, "scratchpad", "active", 0.9) for i in range(47)]
+
+    mock_cursor_p1.fetchall.return_value = page1_rows
+    mock_cursor_p2.fetchall.return_value = page2_rows
+    mock_session.execute.side_effect = [mock_cursor_p1, mock_cursor_p2]
+
+    provider = MockEmbeddingProvider(dimension=64)
+    store = PgVectorStore(provider, lambda: mock_session)
+
+    hits = store.search(
+        "query",
+        top_k=2,
+        filter_fn=lambda m: m.get("memory_type") == "decision",
+    )
+
+    # 1. Returned results do not exceed top_k=2 and preserve retrieval order
+    assert len(hits) == 2
+    assert hits[0][0] == "acc_001"
+    assert hits[1][0] == "acc_002"
+
+    # 2. Assert exactly two paginated SQL queries executed
+    assert mock_session.execute.call_count == 2
+    p1_sql, p1_params = mock_session.execute.call_args_list[0][0]
+    p2_sql, p2_params = mock_session.execute.call_args_list[1][0]
+
+    # 3. Offsets advance correctly and every page has a bounded SQL LIMIT
+    assert "LIMIT :limit OFFSET :offset" in str(p1_sql)
+    assert p1_params["limit"] == 50
+    assert p1_params["offset"] == 0
+
+    assert "LIMIT :limit OFFSET :offset" in str(p2_sql)
+    assert p2_params["limit"] == 50
+    assert p2_params["offset"] == 50
+
+    # 4. Check query contains tie-breaker ordering
+    assert "ORDER BY e.embedding::vector(64) <=> :vec, e.memory_id" in str(p1_sql)
+
+    # 5. Resources cleaned up
+    assert mock_cursor_p1.close.called
+    assert mock_cursor_p2.close.called
+    assert mock_session.close.called

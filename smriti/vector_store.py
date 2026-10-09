@@ -316,20 +316,53 @@ class PgVectorStore(BaseVectorStore):
             hits.append((row.memory_id, row.similarity, meta))
         return hits
 
-    def _stream_filtered_hits(
+    def _paginate_filtered_hits(
         self,
-        cursor: Any,
+        db: Session,
+        base_sql: str,
+        base_params: Dict[str, Any],
         top_k: int,
         filter_fn: Callable[[Dict[str, Any]], bool]
     ) -> List[Tuple[str, float, Dict[str, Any]]]:
-        """Stream candidates in bounded batches when filter_fn is present to avoid fetching all candidates."""
-        batch_size = max(top_k * 2, 50)
+        """Execute bounded SQL queries across pages until top_k filtered hits are found or candidates are exhausted.
+
+        Pagination Strategy and Trade-offs:
+        - Bounded Queries: Uses SQL LIMIT :limit OFFSET :offset (page_size = max(top_k * 2, 50))
+          to bound the number of returned rows per query and application memory usage.
+          Note that while LIMIT bounds the returned rows per query, OFFSET may still require
+          PostgreSQL to scan earlier rows up to the offset boundary, meaning total database execution
+          cost increases with the offset.
+        - Deterministic Ordering: base_sql orders by `vector <=> :vec, e.memory_id`, guaranteeing
+          a strict total order even when vector similarities tie.
+        - Concurrent Mutation Trade-off: Under concurrent inserts/deletes, offset pagination can
+          encounter row shifting (phantom reads or skipped rows across pages). Alternative pagination
+          strategies (such as distance/keyset cursors) may affect PostgreSQL vector-index query planning
+          (e.g., whether HNSW or IVFFlat index scans are selected) and must be carefully validated against
+          the actual EXPLAIN query plan across supported pgvector versions. Given typical read-dominated
+          memory retrieval workflows, bounded offset pagination with deterministic tie-breaking provides
+          a pragmatic balance of predictable query planning, bounded returned row counts, and retrieval correctness.
+        """
+        page_size = max(top_k * 2, 50)
         hits: List[Tuple[str, float, Dict[str, Any]]] = []
+        offset = 0
+
+        paged_sql = f"{base_sql} LIMIT :limit OFFSET :offset"
+
         while len(hits) < top_k:
-            batch = cursor.fetchmany(batch_size)
-            if not batch:
+            page_params = dict(base_params)
+            page_params["limit"] = page_size
+            page_params["offset"] = offset
+
+            cursor = db.execute(text(paged_sql), page_params)
+            try:
+                page_rows = cursor.fetchall()
+            finally:
+                cursor.close()
+
+            if not page_rows:
                 break
-            for row in batch:
+
+            for row in page_rows:
                 meta = {
                     "workspace_id": row.workspace_id,
                     "project_id": row.project_id,
@@ -341,6 +374,12 @@ class PgVectorStore(BaseVectorStore):
                     hits.append((row.memory_id, row.similarity, meta))
                     if len(hits) == top_k:
                         break
+
+            if len(page_rows) < page_size:
+                break
+
+            offset += page_size
+
         return hits
 
     def search(
@@ -350,6 +389,9 @@ class PgVectorStore(BaseVectorStore):
         filters: Optional[VectorFilter] = None,
         filter_fn: Optional[Callable[[Dict[str, Any]], bool]] = None
     ) -> List[Tuple[str, float, Dict[str, Any]]]:
+        if top_k <= 0:
+            return []
+
         q_vec = self.embedding_provider.embed(query)
         # Vector literal
         vec_str = "[" + ",".join(map(str, q_vec)) + "]"
@@ -372,11 +414,7 @@ class PgVectorStore(BaseVectorStore):
                     # Guard for pgvector versions or dialects where iterative_scan is not supported
                     pass
 
-            limit_clause = " LIMIT :limit" if filter_fn is None else ""
-            if filter_fn is None:
-                params["limit"] = top_k
-
-            sql = f"""
+            base_sql = f"""
             SELECT e.memory_id, 1 - (e.embedding::vector({self.dimension}) <=> :vec) as similarity,
                    m.workspace_id, m.project_id, m.memory_type, m.status, m.confidence
             FROM embedding_metadata e
@@ -384,17 +422,20 @@ class PgVectorStore(BaseVectorStore):
             WHERE e.model_name = :m_name
               AND e.model_version = :m_version
               AND e.embedding_dimension = :m_dim{filter_clauses}
-            ORDER BY e.embedding::vector({self.dimension}) <=> :vec{limit_clause}
+            ORDER BY e.embedding::vector({self.dimension}) <=> :vec, e.memory_id
             """
 
-            cursor = db.execute(text(sql), params)
-            try:
-                if filter_fn is None:
+            if filter_fn is None:
+                params["limit"] = top_k
+                sql = f"{base_sql} LIMIT :limit"
+                cursor = db.execute(text(sql), params)
+                try:
                     result = cursor.fetchall()
                     return self._format_hits(result, None)
-                return self._stream_filtered_hits(cursor, top_k, filter_fn)
-            finally:
-                cursor.close()
+                finally:
+                    cursor.close()
+
+            return self._paginate_filtered_hits(db, base_sql, params, top_k, filter_fn)
         finally:
             db.close()
 

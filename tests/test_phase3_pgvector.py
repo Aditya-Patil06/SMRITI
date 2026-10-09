@@ -429,42 +429,41 @@ def test_search_filter_fn_batches_and_stops_at_top_k(pg_session, monkeypatch):
         db.add(Workspace(id="w_batch", user_id="u1", name="Batch Workspace"))
     db.commit()
 
-    # Create 15 memories:
-    # First 12 are "noise" (memory_type="scratchpad")
-    # Next 3 are "match" (memory_type="decision")
-    for i in range(12):
-        db.add(Memory(id=f"m_noise_{i}", workspace_id="w_batch", statement=f"statement common {i}", memory_type="scratchpad", status="active"))
+    # Create 58 memories total:
+    # First 55 are "noise" (memory_type="scratchpad") - guarantees page 1 (50 items) is completely exhausted
+    # Next 3 are "match" (memory_type="decision") located on page 2 (offsets 50+)
+    # Statements are crafted so noise has high text overlap and match items have lower overlap
+    for i in range(55):
+        db.add(Memory(id=f"m_noise_{i:03d}", workspace_id="w_batch", statement=f"statement common apple banana {i:03d}", memory_type="scratchpad", status="active"))
     for i in range(3):
-        db.add(Memory(id=f"m_match_{i}", workspace_id="w_batch", statement=f"statement common extra {i}", memory_type="decision", status="active"))
+        db.add(Memory(id=f"m_match_{i:03d}", workspace_id="w_batch", statement=f"statement common apple dog {i:03d}", memory_type="decision", status="active"))
     db.commit()
 
     provider = MockEmbeddingProvider(dimension=64)
     store = PgVectorStore(provider, pg_session)
-    for i in range(12):
-        store.upsert(f"m_noise_{i}", f"statement common {i}")
+    for i in range(55):
+        store.upsert(f"m_noise_{i:03d}", f"statement common apple banana {i:03d}")
     for i in range(3):
-        store.upsert(f"m_match_{i}", f"statement common extra {i}")
+        store.upsert(f"m_match_{i:03d}", f"statement common apple dog {i:03d}")
 
-    # Set batch_size artificially small to 5 to verify cross-batch iteration and early stopping
-    from sqlalchemy.engine import CursorResult
-    orig_fetchmany = CursorResult.fetchmany
-    fetchmany_calls = []
+    # Track executed queries to verify bounded SQL LIMIT and OFFSET across pages
+    executed_queries = []
+    from sqlalchemy.orm import Session as SASession
+    orig_execute = SASession.execute
 
-    def tracking_fetchmany(self, size=None):
-        fetchmany_calls.append(size)
-        return orig_fetchmany(self, size)
+    def tracking_execute(self, statement, params=None, **kwargs):
+        executed_queries.append((str(statement), params))
+        return orig_execute(self, statement, params, **kwargs)
 
-    monkeypatch.setattr(CursorResult, "fetchmany", tracking_fetchmany)
+    monkeypatch.setattr(SASession, "execute", tracking_execute)
 
     evaluated_metas = []
     def custom_filter(meta):
         evaluated_metas.append(meta)
         return meta.get("memory_type") == "decision"
 
-    # top_k=2 with batch_size=5 (max(2*2, 5) -> batch_size=50 in production, but let's test with top_k=2)
-    # The first batch (or batches) will contain m_noise. Eligible candidates are beyond the initial items.
     hits = store.search(
-        "statement common",
+        "statement common apple banana",
         top_k=2,
         filters=VectorFilter(workspace_id="w_batch"),
         filter_fn=custom_filter,
@@ -477,8 +476,27 @@ def test_search_filter_fn_batches_and_stops_at_top_k(pg_session, monkeypatch):
 
     # 2. Existing filter_fn semantics remain correct
     assert all(h[2]["memory_type"] == "decision" for h in hits)
-    # 3. Only needed candidates were accepted, the 3rd match was never appended
+    # 3. Only needed candidates were accepted; third match on page 2 was never appended
     assert len([m for m in evaluated_metas if m.get("memory_type") == "decision"]) == 2
+
+    # 4. Verifies multiple bounded SQL pages actually executed
+    sql_pages = [
+        (sql, p) for sql, p in executed_queries
+        if "LIMIT :limit OFFSET :offset" in sql
+    ]
+    # Page size for top_k=2 is max(2*2, 50) = 50.
+    # Since 55 noise candidates exist, Page 1 (offset 0) has 0 matches.
+    # Page 2 (offset 50) contains the remaining 5 noise and the 3 matches.
+    # It must execute at least two queries and stop on page 2.
+    assert len(sql_pages) == 2
+    page1_sql, page1_params = sql_pages[0]
+    page2_sql, page2_params = sql_pages[1]
+
+    assert page1_params["limit"] == 50
+    assert page1_params["offset"] == 0
+
+    assert page2_params["limit"] == 50
+    assert page2_params["offset"] == 50
 
 
 def test_search_filter_fn_none_retains_sql_limit(pg_session, monkeypatch):
@@ -503,8 +521,86 @@ def test_search_filter_fn_none_retains_sql_limit(pg_session, monkeypatch):
     # Verify SQL query contains LIMIT :limit and params has limit=7
     matching_query = [
         (sql, p) for sql, p in zip(executed_sqls, executed_params)
-        if "LIMIT :limit" in sql and p and p.get("limit") == 7
+        if "LIMIT :limit" in sql and p and p.get("limit") == 7 and "OFFSET" not in sql
     ]
     assert len(matching_query) == 1
 
+
+def test_search_filter_fn_deterministic_tie_breaking_across_page_boundary(pg_session, monkeypatch):
+    db = pg_session()
+    from smriti.models import Memory, Workspace, User
+    if not db.query(User).filter_by(id="u1").first():
+        db.add(User(id="u1", email="test@test.com", username="test"))
+    if not db.query(Workspace).filter_by(id="w_tie").first():
+        db.add(Workspace(id="w_tie", user_id="u1", name="Tie Workspace"))
+    db.commit()
+
+    # 1. Create 110 memories all with identical statement and identical vector distances
+    # Insert in reverse order to ensure DB natural ordering does not match expected result
+    for i in reversed(range(110)):
+        mem_type = f"type_{i:03d}"
+        db.add(Memory(id=f"m_tie_{i:03d}", workspace_id="w_tie", statement="identical statement", memory_type=mem_type, status="active"))
+    db.commit()
+
+    provider = MockEmbeddingProvider(dimension=64)
+    store = PgVectorStore(provider, pg_session)
+    for i in reversed(range(110)):
+        store.upsert(f"m_tie_{i:03d}", "identical statement")
+
+    # Track executed SQL queries
+    executed_queries = []
+    from sqlalchemy.orm import Session as SASession
+    orig_execute = SASession.execute
+
+    def tracking_execute(self, statement, params=None, **kwargs):
+        executed_queries.append((str(statement), params))
+        return orig_execute(self, statement, params, **kwargs)
+
+    monkeypatch.setattr(SASession, "execute", tracking_execute)
+
+    # 2. top_k = 52 -> page_size = max(52 * 2, 50) = 104
+    # 3. filter_fn accepts only IDs m_tie_054 and later (by inspecting memory_type)
+    hits = store.search(
+        "identical statement",
+        top_k=52,
+        filters=VectorFilter(workspace_id="w_tie"),
+        filter_fn=lambda m: m.get("memory_type", "") >= "type_054",
+    )
+
+    # 4. Page 1 (offset 0, limit 104) yields m_tie_000..m_tie_103:
+    #    filter_fn accepts m_tie_054..m_tie_103 (exactly 50 accepted records).
+    #    Page 2 (offset 104, limit 104) yields m_tie_104..m_tie_109:
+    #    filter_fn accepts m_tie_104 and m_tie_105 to reach top_k=52 and stops.
+    assert len(hits) == 52
+
+    # 5. Exactly two paginated queries executed, with offsets 0 and 104 and bounded limits 104
+    sql_pages = [
+        (sql, p) for sql, p in executed_queries
+        if "LIMIT :limit OFFSET :offset" in sql
+    ]
+    assert len(sql_pages) == 2
+
+    p1_sql, p1_params = sql_pages[0]
+    assert p1_params["limit"] == 104
+    assert p1_params["offset"] == 0
+
+    p2_sql, p2_params = sql_pages[1]
+    assert p2_params["limit"] == 104
+    assert p2_params["offset"] == 104
+
+    # 6. Returned IDs are exactly m_tie_054 through m_tie_105, in order, with no duplicates
+    hit_ids = [h[0] for h in hits]
+    expected_ids = [f"m_tie_{i:03d}" for i in range(54, 106)]
+    assert hit_ids == expected_ids
+    assert len(set(hit_ids)) == 52
+
+
+def test_search_top_k_non_positive_returns_empty(pg_session):
+    provider = MockEmbeddingProvider(dimension=64)
+    store = PgVectorStore(provider, pg_session)
+
+    assert store.search("test", top_k=0) == []
+    assert store.search("test", top_k=-1) == []
+    assert store.search("test", top_k=0, filter_fn=lambda m: True) == []
+    assert store.search("test", top_k=-5, filter_fn=lambda m: True) == []
 
