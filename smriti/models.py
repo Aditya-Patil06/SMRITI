@@ -1,6 +1,16 @@
 from datetime import datetime, timezone
 import uuid
 from sqlalchemy import (
+    create_engine, Column, String, Text, Float, DateTime, Boolean, ForeignKey, JSON, Integer, UniqueConstraint
+)
+try:
+    from pgvector.sqlalchemy import Vector
+    HAS_PGVECTOR = True
+except ImportError:
+    HAS_PGVECTOR = False
+
+# dummy to replace old block
+from sqlalchemy import (
     create_engine, Column, String, Text, Float, DateTime, Boolean, ForeignKey, JSON
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
@@ -9,6 +19,7 @@ from smriti.config import settings
 Base = declarative_base()
 
 PROJECT_FK = "projects.id"
+MEMORIES_FK = "memories.id"
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -22,7 +33,7 @@ class User(Base):
     username = Column(String(128), unique=True, nullable=False)
     email = Column(String(256), nullable=True)
     created_at = Column(DateTime, default=utcnow)
-    
+
     workspaces = relationship("Workspace", back_populates="user", cascade="all, delete-orphan")
     provider_accounts = relationship("ProviderAccount", back_populates="user", cascade="all, delete-orphan")
 
@@ -121,7 +132,7 @@ class Milestone(Base):
     title = Column(String(256), nullable=False)
     description = Column(Text, nullable=True)
     milestone_type = Column(String(64), nullable=False)  # project_created, architecture_decided, technology_selected, feature_completed, phase_completed
-    evidence_memory_id = Column(String(64), ForeignKey("memories.id"), nullable=True)
+    evidence_memory_id = Column(String(64), ForeignKey(MEMORIES_FK), nullable=True)
     reached_at = Column(DateTime, default=utcnow)
     created_at = Column(DateTime, default=utcnow)
 
@@ -135,21 +146,21 @@ class Memory(Base):
     project_id = Column(String(64), ForeignKey(PROJECT_FK), nullable=True)
     source_message_id = Column(String(64), ForeignKey("messages.id"), nullable=True)
     source_conversation_id = Column(String(64), nullable=True)
-    
+
     memory_type = Column(String(64), nullable=False)  # decision, task, problem, solution, technology, concept, constraint, fact, status_change
     statement = Column(Text, nullable=False)
     rationale = Column(Text, nullable=True)
     structured_claim = Column(JSON, nullable=True)  # {"subject": "...", "predicate": "...", "object": "...", "scope": {...}}
     details = Column(JSON, default=dict)
-    
+
     # Status: active, superseded, conflicting, deprecated, source_unavailable, forgotten, review_required
     status = Column(String(64), default="active")
     confidence = Column(Float, default=1.0)
     extraction_method = Column(String(64), default="rule_heuristic")  # rule_heuristic, llm, user_explicit
-    
+
     version = Column(Float, default=1.0)
     superseded_by_id = Column(String(64), nullable=True)
-    
+
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow)
     last_confirmed_at = Column(DateTime, default=utcnow)
@@ -162,7 +173,7 @@ class Memory(Base):
 class MemoryVersion(Base):
     __tablename__ = "memory_versions"
     id = Column(String(64), primary_key=True, default=generate_uuid)
-    memory_id = Column(String(64), ForeignKey("memories.id"), nullable=False)
+    memory_id = Column(String(64), ForeignKey(MEMORIES_FK), nullable=False)
     version_number = Column(Float, nullable=False)
     statement = Column(Text, nullable=False)
     rationale = Column(Text, nullable=True)
@@ -193,6 +204,36 @@ class AuditLog(Base):
     action = Column(String(64), nullable=False)  # create, update, delete, supersede, resolve_conflict, confirm
     details = Column(JSON, default=dict)
     created_at = Column(DateTime, default=utcnow)
+
+
+
+from sqlalchemy.types import TypeDecorator, JSON
+class VectorType(TypeDecorator):
+    impl = JSON
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == 'postgresql' and HAS_PGVECTOR:
+            return dialect.type_descriptor(Vector())
+        else:
+            return dialect.type_descriptor(JSON())
+
+class EmbeddingMetadata(Base):
+    __tablename__ = "embedding_metadata"
+    id = Column(String(64), primary_key=True, default=generate_uuid)
+    memory_id = Column(String(64), ForeignKey(MEMORIES_FK, ondelete="CASCADE"), nullable=False)
+    model_name = Column(String(128), nullable=False)
+    model_version = Column(String(64), nullable=False)
+    embedding_dimension = Column(Integer, nullable=False)
+    content_hash = Column(String(64), nullable=False)
+
+    embedding = Column(VectorType, nullable=True)
+
+    created_at = Column(DateTime, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('memory_id', 'model_name', 'model_version', 'content_hash', name='uix_embedding_idempotency'),
+    )
 
 # Engine and session initialization
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
