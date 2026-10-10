@@ -429,22 +429,39 @@ def test_search_filter_fn_batches_and_stops_at_top_k(pg_session, monkeypatch):
         db.add(Workspace(id="w_batch", user_id="u1", name="Batch Workspace"))
     db.commit()
 
-    # Create 58 memories total:
-    # First 55 are "noise" (memory_type="scratchpad") - guarantees page 1 (50 items) is completely exhausted
-    # Next 3 are "match" (memory_type="decision") located on page 2 (offsets 50+)
-    # Statements are crafted so noise has high text overlap and match items have lower overlap
     for i in range(55):
-        db.add(Memory(id=f"m_noise_{i:03d}", workspace_id="w_batch", statement=f"statement common apple banana {i:03d}", memory_type="scratchpad", status="active"))
+        db.add(Memory(id=f"m_noise_{i:03d}", workspace_id="w_batch", statement=f"noise candidate {i:03d}", memory_type="scratchpad", status="active"))
     for i in range(3):
-        db.add(Memory(id=f"m_match_{i:03d}", workspace_id="w_batch", statement=f"statement common apple dog {i:03d}", memory_type="decision", status="active"))
+        db.add(Memory(id=f"m_match_{i:03d}", workspace_id="w_batch", statement=f"match candidate {i:03d}", memory_type="decision", status="active"))
     db.commit()
 
-    provider = MockEmbeddingProvider(dimension=64)
+    # Define a test-local provider with mathematically controlled cosine distances to query:
+    # Query vector has 1.0 along axis 0.
+    # Noise vectors have 0.9 along axis 0 -> cosine distance = 0.1 (closer to query).
+    # Match vectors have 0.5 along axis 0 -> cosine distance = 0.5 (further from query).
+    # Cosine distance ordering (<=>) guarantees all noise candidates rank ahead of match candidates,
+    # regardless of text hashing, word collisions, or numeric suffixes.
+    class ControlledRankingEmbeddingProvider(MockEmbeddingProvider):
+        def embed(self, text: str):
+            vec = [0.0] * self._dimension
+            if "query" in text:
+                vec[0] = 1.0
+            elif "noise" in text:
+                vec[0] = 0.9
+                vec[1] = (1.0 - 0.9 ** 2) ** 0.5
+            elif "match" in text:
+                vec[0] = 0.5
+                vec[1] = (1.0 - 0.5 ** 2) ** 0.5
+            else:
+                vec[2] = 1.0
+            return vec
+
+    provider = ControlledRankingEmbeddingProvider(dimension=64)
     store = PgVectorStore(provider, pg_session)
     for i in range(55):
-        store.upsert(f"m_noise_{i:03d}", f"statement common apple banana {i:03d}")
+        store.upsert(f"m_noise_{i:03d}", f"noise candidate {i:03d}")
     for i in range(3):
-        store.upsert(f"m_match_{i:03d}", f"statement common apple dog {i:03d}")
+        store.upsert(f"m_match_{i:03d}", f"match candidate {i:03d}")
 
     # Track executed queries to verify bounded SQL LIMIT and OFFSET across pages
     executed_queries = []
@@ -463,7 +480,7 @@ def test_search_filter_fn_batches_and_stops_at_top_k(pg_session, monkeypatch):
         return meta.get("memory_type") == "decision"
 
     hits = store.search(
-        "statement common apple banana",
+        "query",
         top_k=2,
         filters=VectorFilter(workspace_id="w_batch"),
         filter_fn=custom_filter,
