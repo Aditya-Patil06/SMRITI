@@ -334,21 +334,21 @@ The development of Project SMRITI follows a capability-based progression:
    {
      "mcpServers": {
        "smriti": {
-         "command": "C:\\Users\\admin\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+         "command": "C:\\path\\to\\python.exe",
          "args": [
            "-m",
            "smriti.mcp_server"
          ],
          "env": {
-           "PYTHONPATH": "C:\\Users\\admin\\.gemini\\antigravity\\scratch\\project-smriti",
-           "SMRITI_DATABASE_URL": "sqlite:///C:/Users/admin/.gemini/antigravity/scratch/project-smriti/smriti.db",
+           "PYTHONPATH": "C:\\path\\to\\project-smriti",
+           "SMRITI_DATABASE_URL": "sqlite:///C:/path/to/project-smriti/smriti.db",
            "SMRITI_EMBEDDING_PROVIDER": "mock"
          }
        }
      }
    }
    ```
-   *(Note: Ensure paths use escaped backslashes `\\\\` in JSON strings. If using a virtual environment, set `"command"` to that venv's Python binary, e.g., `<venv>\\Scripts\\python.exe`.)*
+   *(Note: Ensure paths use escaped backslashes `\\\\` in JSON strings. If using a virtual environment, set `"command"` to that venv's Python binary, e.g., `C:\\path\\to\\project-smriti\\.venv\\Scripts\\python.exe`.)*
 
 ### Frontend Setup
 1. Navigate to the frontend directory:
