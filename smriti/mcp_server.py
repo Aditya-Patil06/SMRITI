@@ -48,8 +48,8 @@ def bootstrap_server() -> None:
         vector_store.rebuild_from_db(db)
         _bootstrap_completed = True
         logger.info("SMRITI bootstrap completed successfully.")
-    except Exception as exc:
-        logger.error("Failed during SMRITI bootstrap: %s", exc)
+    except Exception:
+        logger.exception("Failed during SMRITI bootstrap")
         raise
     finally:
         db.close()
@@ -64,6 +64,210 @@ def get_db_session() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+def validate_string_identifier(
+    value: Any,
+    field_name: str,
+    max_length: int = 255,
+) -> str:
+    """Validate and sanitize a required string identifier field."""
+    if not isinstance(value, str):
+        raise ToolError(f"Invalid input: '{field_name}' must be a string.")
+    cleaned = value.strip()
+    if not cleaned:
+        raise ToolError(f"Invalid input: '{field_name}' must be a non-empty string.")
+    if len(cleaned) > max_length:
+        raise ToolError(
+            f"Invalid input: '{field_name}' exceeds maximum length of {max_length} characters."
+        )
+    return cleaned
+
+
+def validate_optional_string(
+    value: Optional[Any],
+    field_name: str,
+    max_length: int,
+) -> Optional[str]:
+    """Validate an optional string parameter, returning cleaned value or None."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ToolError(f"Invalid input: '{field_name}' must be a string or null.")
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > max_length:
+        raise ToolError(
+            f"Invalid input: '{field_name}' exceeds maximum length of {max_length} characters."
+        )
+    return cleaned
+
+
+def validate_limit(limit: Any) -> int:
+    """Validate search memory limit parameter."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 20:
+        raise ToolError("Invalid input: 'limit' must be an integer between 1 and 20.")
+    return limit
+
+
+def get_verified_workspace(db: Session, workspace_id: str) -> Workspace:
+    """Look up a workspace by id or raise ToolError if missing."""
+    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    if not workspace:
+        raise ToolError(f"Workspace not found: '{workspace_id}'")
+    return workspace
+
+
+def get_verified_project(db: Session, project_id: str, workspace_id: str) -> Project:
+    """Look up a project by id and verify it belongs to workspace_id."""
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project or project.workspace_id != workspace_id:
+        raise ToolError(f"Project '{project_id}' not found in workspace '{workspace_id}'.")
+    return project
+
+
+def execute_list_workspaces() -> Dict[str, Any]:
+    """Execute list_workspaces business logic."""
+    try:
+        with get_db_session() as db:
+            workspaces = db.query(Workspace).order_by(Workspace.created_at.asc()).all()
+            result = [
+                {
+                    "id": w.id,
+                    "name": w.name,
+                    "description": w.description or "",
+                    "is_default": bool(w.is_default),
+                }
+                for w in workspaces
+            ]
+            return {"workspaces": result}
+    except ToolError:
+        raise
+    except Exception as exc:
+        logger.exception("Error in list_workspaces")
+        raise ToolError("Failed to list workspaces due to an internal error.") from exc
+
+
+def execute_list_projects(workspace_id: StrictStr) -> Dict[str, Any]:
+    """Execute list_projects business logic."""
+    w_id = validate_string_identifier(workspace_id, "workspace_id")
+    try:
+        with get_db_session() as db:
+            get_verified_workspace(db, w_id)
+            projects = (
+                db.query(Project)
+                .filter(Project.workspace_id == w_id)
+                .order_by(Project.created_at.asc())
+                .all()
+            )
+            result = [
+                {
+                    "id": p.id,
+                    "workspace_id": p.workspace_id,
+                    "name": p.name,
+                    "description": p.description or "",
+                    "goal": p.goal or "",
+                    "status": p.status,
+                }
+                for p in projects
+            ]
+            return {"projects": result}
+    except ToolError:
+        raise
+    except Exception as exc:
+        logger.exception("Error in list_projects")
+        raise ToolError("Failed to list projects due to an internal error.") from exc
+
+
+def execute_search_memories(
+    query: StrictStr,
+    workspace_id: StrictStr,
+    project_id: Optional[StrictStr] = None,
+    limit: StrictInt = 15,
+    include_superseded: StrictBool = False,
+) -> Dict[str, Any]:
+    """Execute search_memories business logic."""
+    q = validate_string_identifier(query, "query", max_length=2000)
+    w_id = validate_string_identifier(workspace_id, "workspace_id")
+    p_id = validate_optional_string(project_id, "project_id", max_length=255)
+    checked_limit = validate_limit(limit)
+
+    if not isinstance(include_superseded, bool):
+        raise ToolError("Invalid input: 'include_superseded' must be a boolean.")
+
+    try:
+        with get_db_session() as db:
+            get_verified_workspace(db, w_id)
+            if p_id:
+                get_verified_project(db, p_id, w_id)
+
+            hits = retrieval_engine.search(
+                db=db,
+                query=q,
+                project_id=p_id,
+                workspace_id=w_id,
+                limit=checked_limit,
+                include_superseded=bool(include_superseded),
+            )
+
+            items = [
+                {
+                    "id": hit.id,
+                    "type": hit.type,
+                    "title": hit.title,
+                    "content": hit.content,
+                    "score": round(float(hit.score), 4),
+                    "metadata": hit.metadata,
+                }
+                for hit in hits
+            ]
+            return {"results": items}
+    except ToolError:
+        raise
+    except Exception as exc:
+        logger.exception("Error in search_memories")
+        raise ToolError("Failed to search memories due to an internal error.") from exc
+
+
+def execute_build_context_package(
+    workspace_id: StrictStr,
+    project_id: StrictStr,
+    query: Optional[StrictStr] = None,
+    task_description: Optional[StrictStr] = None,
+) -> Dict[str, Any]:
+    """Execute build_context_package business logic."""
+    w_id = validate_string_identifier(workspace_id, "workspace_id")
+    p_id = validate_string_identifier(project_id, "project_id")
+    q_cleaned = validate_optional_string(query, "query", max_length=2000) or ""
+    t_desc_cleaned = validate_optional_string(task_description, "task_description", max_length=4000)
+
+    # Combine query and task_description if both are provided for memory retrieval and prompt synthesis
+    effective_query = q_cleaned
+    if t_desc_cleaned:
+        if effective_query:
+            effective_query = f"{effective_query} - {t_desc_cleaned}"
+        else:
+            effective_query = t_desc_cleaned
+
+    try:
+        with get_db_session() as db:
+            get_verified_workspace(db, w_id)
+            get_verified_project(db, p_id, w_id)
+
+            package = context_engine.build_context(
+                db=db,
+                query=effective_query,
+                project_id=p_id,
+                workspace_id=w_id,
+            )
+
+            return package.model_dump()
+    except ToolError:
+        raise
+    except Exception as exc:
+        logger.exception("Error in build_context_package")
+        raise ToolError("Failed to build context package due to an internal error.") from exc
 
 
 def create_mcp_server() -> MCPServer:
@@ -83,24 +287,7 @@ def create_mcp_server() -> MCPServer:
     )
     def list_workspaces() -> Dict[str, Any]:
         """List available workspaces without exposing user credentials or private auth metadata."""
-        try:
-            with get_db_session() as db:
-                workspaces = db.query(Workspace).order_by(Workspace.created_at.asc()).all()
-                result = [
-                    {
-                        "id": w.id,
-                        "name": w.name,
-                        "description": w.description or "",
-                        "is_default": bool(w.is_default),
-                    }
-                    for w in workspaces
-                ]
-                return {"workspaces": result}
-        except ToolError:
-            raise
-        except Exception as exc:
-            logger.error("Error in list_workspaces: %s", exc)
-            raise ToolError("Failed to list workspaces due to an internal error.") from exc
+        return execute_list_workspaces()
 
     @server.tool(
         name="list_projects",
@@ -111,44 +298,7 @@ def create_mcp_server() -> MCPServer:
 
         Validates workspace existence and isolates results to the given workspace.
         """
-        if not isinstance(workspace_id, str):
-            raise ToolError("Invalid input: 'workspace_id' must be a string.")
-
-        w_id = workspace_id.strip()
-        if not w_id:
-            raise ToolError("Invalid input: 'workspace_id' must be a non-empty string.")
-        if len(w_id) > 255:
-            raise ToolError("Invalid input: 'workspace_id' exceeds maximum length of 255 characters.")
-
-        try:
-            with get_db_session() as db:
-                workspace = db.query(Workspace).filter(Workspace.id == w_id).first()
-                if not workspace:
-                    raise ToolError(f"Workspace not found: '{w_id}'")
-
-                projects = (
-                    db.query(Project)
-                    .filter(Project.workspace_id == w_id)
-                    .order_by(Project.created_at.asc())
-                    .all()
-                )
-                result = [
-                    {
-                        "id": p.id,
-                        "workspace_id": p.workspace_id,
-                        "name": p.name,
-                        "description": p.description or "",
-                        "goal": p.goal or "",
-                        "status": p.status,
-                    }
-                    for p in projects
-                ]
-                return {"projects": result}
-        except ToolError:
-            raise
-        except Exception as exc:
-            logger.error("Error in list_projects: %s", exc)
-            raise ToolError("Failed to list projects due to an internal error.") from exc
+        return execute_list_projects(workspace_id)
 
     @server.tool(
         name="search_memories",
@@ -168,79 +318,13 @@ def create_mcp_server() -> MCPServer:
 
         Validates workspace existence and ensures any supplied project belongs to that workspace.
         """
-        if not isinstance(query, str):
-            raise ToolError("Invalid input: 'query' must be a string.")
-        q = query.strip()
-        if not q:
-            raise ToolError("Invalid input: 'query' must be a non-empty string.")
-        if len(q) > 2000:
-            raise ToolError("Invalid input: 'query' exceeds maximum length of 2000 characters.")
-
-        if not isinstance(workspace_id, str):
-            raise ToolError("Invalid input: 'workspace_id' must be a string.")
-        w_id = workspace_id.strip()
-        if not w_id:
-            raise ToolError("Invalid input: 'workspace_id' must be a non-empty string.")
-        if len(w_id) > 255:
-            raise ToolError("Invalid input: 'workspace_id' exceeds maximum length of 255 characters.")
-
-        p_id: Optional[str] = None
-        if project_id is not None:
-            if not isinstance(project_id, str):
-                raise ToolError("Invalid input: 'project_id' must be a string or null.")
-            p_id_cleaned = project_id.strip()
-            if p_id_cleaned:
-                if len(p_id_cleaned) > 255:
-                    raise ToolError("Invalid input: 'project_id' exceeds maximum length of 255 characters.")
-                p_id = p_id_cleaned
-
-        if isinstance(limit, bool) or not isinstance(limit, int):
-            raise ToolError("Invalid input: 'limit' must be an integer between 1 and 20.")
-        if limit < 1 or limit > 20:
-            raise ToolError("Invalid input: 'limit' must be an integer between 1 and 20.")
-
-        if not isinstance(include_superseded, bool):
-            raise ToolError("Invalid input: 'include_superseded' must be a boolean.")
-
-        try:
-            with get_db_session() as db:
-                workspace = db.query(Workspace).filter(Workspace.id == w_id).first()
-                if not workspace:
-                    raise ToolError(f"Workspace not found: '{w_id}'")
-
-                if p_id:
-                    project = db.query(Project).filter(Project.id == p_id).first()
-                    if not project or project.workspace_id != w_id:
-                        raise ToolError(
-                            f"Project '{p_id}' not found in workspace '{w_id}'."
-                        )
-
-                hits = retrieval_engine.search(
-                    db=db,
-                    query=q,
-                    project_id=p_id,
-                    workspace_id=w_id,
-                    limit=limit,
-                    include_superseded=bool(include_superseded),
-                )
-
-                items = [
-                    {
-                        "id": hit.id,
-                        "type": hit.type,
-                        "title": hit.title,
-                        "content": hit.content,
-                        "score": round(float(hit.score), 4),
-                        "metadata": hit.metadata,
-                    }
-                    for hit in hits
-                ]
-                return {"results": items}
-        except ToolError:
-            raise
-        except Exception as exc:
-            logger.error("Error in search_memories: %s", exc)
-            raise ToolError("Failed to search memories due to an internal error.") from exc
+        return execute_search_memories(
+            query=query,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            limit=limit,
+            include_superseded=include_superseded,
+        )
 
     @server.tool(
         name="build_context_package",
@@ -260,73 +344,12 @@ def create_mcp_server() -> MCPServer:
 
         Validates workspace existence and ensures the supplied project belongs to that workspace.
         """
-        if not isinstance(workspace_id, str):
-            raise ToolError("Invalid input: 'workspace_id' must be a string.")
-        w_id = workspace_id.strip()
-        if not w_id:
-            raise ToolError("Invalid input: 'workspace_id' must be a non-empty string.")
-        if len(w_id) > 255:
-            raise ToolError("Invalid input: 'workspace_id' exceeds maximum length of 255 characters.")
-
-        if not isinstance(project_id, str):
-            raise ToolError("Invalid input: 'project_id' must be a string.")
-        p_id = project_id.strip()
-        if not p_id:
-            raise ToolError("Invalid input: 'project_id' must be a non-empty string.")
-        if len(p_id) > 255:
-            raise ToolError("Invalid input: 'project_id' exceeds maximum length of 255 characters.")
-
-        q_cleaned = ""
-        if query is not None:
-            if not isinstance(query, str):
-                raise ToolError("Invalid input: 'query' must be a string or null.")
-            q_candidate = query.strip()
-            if len(q_candidate) > 2000:
-                raise ToolError("Invalid input: 'query' exceeds maximum length of 2000 characters.")
-            q_cleaned = q_candidate
-
-        t_desc_cleaned: Optional[str] = None
-        if task_description is not None:
-            if not isinstance(task_description, str):
-                raise ToolError("Invalid input: 'task_description' must be a string or null.")
-            t_candidate = task_description.strip()
-            if len(t_candidate) > 4000:
-                raise ToolError("Invalid input: 'task_description' exceeds maximum length of 4000 characters.")
-            t_desc_cleaned = t_candidate
-
-        # Combine query and task_description if both are provided for memory retrieval and prompt synthesis
-        effective_query = q_cleaned
-        if t_desc_cleaned:
-            if effective_query:
-                effective_query = f"{effective_query} - {t_desc_cleaned}"
-            else:
-                effective_query = t_desc_cleaned
-
-        try:
-            with get_db_session() as db:
-                workspace = db.query(Workspace).filter(Workspace.id == w_id).first()
-                if not workspace:
-                    raise ToolError(f"Workspace not found: '{w_id}'")
-
-                project = db.query(Project).filter(Project.id == p_id).first()
-                if not project or project.workspace_id != w_id:
-                    raise ToolError(
-                        f"Project '{p_id}' not found in workspace '{w_id}'."
-                    )
-
-                package = context_engine.build_context(
-                    db=db,
-                    query=effective_query,
-                    project_id=p_id,
-                    workspace_id=w_id,
-                )
-
-                return package.model_dump()
-        except ToolError:
-            raise
-        except Exception as exc:
-            logger.error("Error in build_context_package: %s", exc)
-            raise ToolError("Failed to build context package due to an internal error.") from exc
+        return execute_build_context_package(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            query=query,
+            task_description=task_description,
+        )
 
     return server
 
