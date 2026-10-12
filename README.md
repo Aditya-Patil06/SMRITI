@@ -305,7 +305,8 @@ The development of Project SMRITI follows a capability-based progression:
      ```bash
      pytest -v
      ```
-     *In local environments without PostgreSQL running (`SMRITI_PG_TESTS` unset), the PostgreSQL integration suite is skipped automatically. Local validation yields **81 passed, 17 skipped** across the entire repository (MCP tests: **9 passed**; embedding tests: **5 passed, 1 skipped**).*
+     *In local environments without PostgreSQL running (`SMRITI_PG_TESTS` unset), the PostgreSQL integration suite (16 tests) is skipped automatically along with 1 optional local embedding test. Local validation yields **88 passed, 17 skipped, 1 warning** across the entire repository (MCP tests: **16 passed, 1 warning**; embedding tests: **5 passed, 1 skipped**).*
+
    - **Continuous Integration (CI — GitHub Actions)**:
      The GitHub Actions CI pipeline tests both Layer A and Layer B:
      1. Runs Layer A SQLite tests including MCP server tests (`pytest -q --ignore=tests/test_phase3_pgvector.py`).
@@ -317,6 +318,14 @@ The development of Project SMRITI follows a capability-based progression:
      ```bash
      uvicorn smriti.api:app --reload --port 8000
      ```
+   - **Administrative Database Preparation & Indexing**:
+     Ordinary MCP server execution is strictly read-only by default and will not alter database schemas, seed records, or write persistent vector files. Before running the MCP server for the first time, prepare the database and vector indices:
+     ```bash
+     # Initialize database tables and default entities:
+     python -m smriti.mcp_server --init-only
+     # Or rebuild existing vector store indices explicitly:
+     python -m smriti.mcp_server --rebuild-indices --init-only
+     ```
    - **Start the Local Read-Only MCP Server (stdio transport)**:
      ```bash
      python -m smriti.mcp_server
@@ -327,28 +336,36 @@ The development of Project SMRITI follows a capability-based progression:
    Add the SMRITI MCP server to your `claude_desktop_config.json` (on Windows located at `%APPDATA%\Claude\claude_desktop_config.json`, or on macOS at `~/Library/Application Support/Claude/claude_desktop_config.json`).
 
    > [!NOTE]
-   > Claude Desktop stdio transports launch the server process directly and may ignore nonstandard working-directory properties (such as `cwd`). To ensure reliable module discovery and database access across any working directory, specify the absolute path to your Python interpreter and pass `PYTHONPATH` along with an absolute database URL in `env`.
+   > **Deployment Model & User Scoping:**
+   > SMRITI Phase 4.1 implements a **trusted, single-user local stdio deployment**. To isolate access, the MCP server evaluates `SMRITI_MCP_USER_ID`:
+   > - If `SMRITI_MCP_USER_ID` is set, `list_workspaces`, `list_projects`, `search_memories`, and `build_context_package` strictly enforce ownership and access for that user only.
+   > - If `SMRITI_MCP_USER_ID` is unset on a database with exactly one user, that user is automatically resolved as the active local user.
+   > - If multiple users exist in the database and `SMRITI_MCP_USER_ID` is not configured, the server refuses to start to prevent cross-user data leakage.
+   >
+   > > [!WARNING]
+   > > `SMRITI_MCP_USER_ID` is an environment-level scope for local desktop processes and does **not** provide cryptographic authentication or authorization for untrusted remote networks. Do **not** connect the local stdio MCP server directly to a shared multi-tenant database without user-level authentication.
 
    **Example Windows configuration** *(substitute your actual Python interpreter and repository paths)*:
    ```json
    {
      "mcpServers": {
        "smriti": {
-         "command": "C:\\Users\\admin\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+         "command": "C:\\path\\to\\python.exe",
          "args": [
            "-m",
            "smriti.mcp_server"
          ],
          "env": {
-           "PYTHONPATH": "C:\\Users\\admin\\.gemini\\antigravity\\scratch\\project-smriti",
-           "SMRITI_DATABASE_URL": "sqlite:///C:/Users/admin/.gemini/antigravity/scratch/project-smriti/smriti.db",
-           "SMRITI_EMBEDDING_PROVIDER": "mock"
+           "PYTHONPATH": "C:\\path\\to\\project-smriti",
+           "SMRITI_DATABASE_URL": "sqlite:///C:/path/to/project-smriti/smriti.db",
+           "SMRITI_EMBEDDING_PROVIDER": "mock",
+           "SMRITI_MCP_USER_ID": "default-user"
          }
        }
      }
    }
    ```
-   *(Note: Ensure paths use escaped backslashes `\\\\` in JSON strings. If using a virtual environment, set `"command"` to that venv's Python binary, e.g., `<venv>\\Scripts\\python.exe`.)*
+   *(Note: Ensure paths use escaped backslashes `\\\\` in JSON strings. If using a virtual environment, set `"command"` to that venv's Python binary, e.g., `C:\\path\\to\\project-smriti\\.venv\\Scripts\\python.exe`.)*
 
 ### Frontend Setup
 1. Navigate to the frontend directory:
