@@ -32,7 +32,7 @@ jobs:
         
     - name: Install dependencies
       run: |
-        pip install --only-binary :all: --no-binary project-smriti -c constraints.txt ".[dev,phase3]"
+        pip install --only-binary :all: --no-binary project-smriti -c constraints.txt ".[dev,phase3,phase4]"
         
     - name: Run Layer A Tests (SQLite)
       run: |

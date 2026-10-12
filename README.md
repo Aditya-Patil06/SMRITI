@@ -172,6 +172,7 @@ Exports can be executed globally or scoped to specific workspaces. Imports valid
 | **Conflict & Supersession Handling** | **IMPLEMENTED** | 5-way diff engine, structured supersession claim matching, coexistence edge persistence, and interactive conflict resolution. |
 | **Project State Synthesis** | **IMPLEMENTED** | Autonomous project state synthesis, milestone detection, and architecture overview tracking across active/superseded memories. |
 | **Canonical Portability** | **IMPLEMENTED** | Zero-loss atomic export/import format (`v1.1.0`) with manifest validation, scoped export, and transactional safety. |
+| **Local MCP Server (stdio)** | **IMPLEMENTED** | Local read-only Model Context Protocol server (`smriti.mcp_server`, MCP Python SDK v2) exposing `list_workspaces`, `list_projects`, `search_memories`, and `build_context_package`. |
 | **Web Control Center** | **IMPLEMENTED** | React + TypeScript + Vite control center providing Dashboard, Memory Bank, Graph Visualizer, and Context Generator. |
 | **Provider Importers** | **IMPLEMENTED** | Normalization parsers for ChatGPT, Claude, Gemini, and Generic standard formats. |
 | **Provider Adapters** | **PROTOTYPE** | Adapter layer providing prompt formatting and capability matrix discovery. |
@@ -218,13 +219,13 @@ The development of Project SMRITI follows a capability-based progression:
 - Non-PostgreSQL compatibility using JSON embedding storage and in-memory vector store.
 - Local dense embedding models via optional `sentence-transformers` integration.
 
-### Phase 4 — Provider Integrations & MCP (Next Planned Phase)
-- Formal Model Context Protocol (MCP) server integration for Claude and compatible agents.
-- Custom GPT actions and plugin endpoints for authorized ChatGPT access.
-- Official Gemini Extensions and Function Calling integrations.
-- Local model execution adapters (e.g., Ollama, vLLM).
-- Multi-hop graph-augmented topological retrieval reasoning.
-- Cross-workspace explicit sharing and selective subgraph publishing.
+### Phase 4 — Provider Integrations & MCP (In Progress)
+- **Local Read-Only MCP Server (`smriti.mcp_server`)** (Completed in Phase 4.1): Formal Model Context Protocol (MCP) server over local stdio transport for Claude Desktop and compatible MCP clients, exposing `list_workspaces`, `list_projects`, `search_memories`, and `build_context_package`.
+- Custom GPT actions and plugin endpoints for authorized ChatGPT access (Planned).
+- Official Gemini Extensions and Function Calling integrations (Planned).
+- Local model execution adapters (e.g., Ollama, vLLM) (Planned).
+- Multi-hop graph-augmented topological retrieval reasoning (Planned).
+- Cross-workspace explicit sharing and selective subgraph publishing (Planned).
 
 ### Phase 5 — Production Hardening & Encryption (Future Phase)
 - Full PostgreSQL backend deployment profile.
@@ -265,6 +266,13 @@ The development of Project SMRITI follows a capability-based progression:
      pip install -e ".[dev,phase3]"
      ```
      *Note: The `phase3` extra bundles `pgvector`, `psycopg[binary]`, and `sentence-transformers`.*
+   - **Phase 4 MCP Server Workflow** (Model Context Protocol stdio server):
+     ```bash
+     pip install -e ".[dev,phase4]"
+     # Or install all extras together:
+     pip install -e ".[dev,phase3,phase4]"
+     ```
+     *Note: The `phase4` extra installs `mcp>=2,<3`.*
 
 3. **Configure Database & Embeddings**:
    By default, `smriti/config.py` targets SQLite (`sqlite:///./smriti.db`) but configures `SMRITI_EMBEDDING_PROVIDER="local"`. Configure your environment according to your workflow (examples show Bash-compatible syntax; on Windows PowerShell, use `$env:VARIABLE="value"`):
@@ -297,17 +305,50 @@ The development of Project SMRITI follows a capability-based progression:
      ```bash
      pytest -v
      ```
-     *In local environments without PostgreSQL running (`SMRITI_PG_TESTS` unset), the PostgreSQL integration suite is skipped automatically. Local validation yields **72 passed, 17 skipped** across the entire repository (embedding tests: **5 passed, 1 skipped**).*
+     *In local environments without PostgreSQL running (`SMRITI_PG_TESTS` unset), the PostgreSQL integration suite is skipped automatically. Local validation yields **81 passed, 17 skipped** across the entire repository (MCP tests: **9 passed**; embedding tests: **5 passed, 1 skipped**).*
    - **Continuous Integration (CI — GitHub Actions)**:
      The GitHub Actions CI pipeline tests both Layer A and Layer B:
-     1. Runs Layer A SQLite tests (`pytest -q --ignore=tests/test_phase3_pgvector.py`).
+     1. Runs Layer A SQLite tests including MCP server tests (`pytest -q --ignore=tests/test_phase3_pgvector.py`).
      2. Runs Alembic migrations on a live `pgvector/pgvector:pg16` PostgreSQL container (`alembic upgrade head`).
      3. Runs Layer B PostgreSQL + pgvector tests (`SMRITI_PG_TESTS=1 pytest tests/test_phase3_pgvector.py -v -s`).
 
-6. **Start the SMRITI API server**:
-   ```bash
-   uvicorn smriti.api:app --reload --port 8000
+6. **Run SMRITI Services**:
+   - **Start the REST API server**:
+     ```bash
+     uvicorn smriti.api:app --reload --port 8000
+     ```
+   - **Start the Local Read-Only MCP Server (stdio transport)**:
+     ```bash
+     python -m smriti.mcp_server
+     ```
+     *The MCP server speaks JSON-RPC 2.0 over standard input/output (stdio). Protocol messages are exchanged on stdout, while diagnostic logs and startup traces are directed to stderr.*
+
+7. **Configure Claude Desktop (MCP Client)**:
+   Add the SMRITI MCP server to your `claude_desktop_config.json` (on Windows located at `%APPDATA%\Claude\claude_desktop_config.json`, or on macOS at `~/Library/Application Support/Claude/claude_desktop_config.json`).
+
+   > [!NOTE]
+   > Claude Desktop stdio transports launch the server process directly and may ignore nonstandard working-directory properties (such as `cwd`). To ensure reliable module discovery and database access across any working directory, specify the absolute path to your Python interpreter and pass `PYTHONPATH` along with an absolute database URL in `env`.
+
+   **Example Windows configuration** *(substitute your actual Python interpreter and repository paths)*:
+   ```json
+   {
+     "mcpServers": {
+       "smriti": {
+         "command": "C:\\Users\\admin\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+         "args": [
+           "-m",
+           "smriti.mcp_server"
+         ],
+         "env": {
+           "PYTHONPATH": "C:\\Users\\admin\\.gemini\\antigravity\\scratch\\project-smriti",
+           "SMRITI_DATABASE_URL": "sqlite:///C:/Users/admin/.gemini/antigravity/scratch/project-smriti/smriti.db",
+           "SMRITI_EMBEDDING_PROVIDER": "mock"
+         }
+       }
+     }
+   }
    ```
+   *(Note: Ensure paths use escaped backslashes `\\\\` in JSON strings. If using a virtual environment, set `"command"` to that venv's Python binary, e.g., `<venv>\\Scripts\\python.exe`.)*
 
 ### Frontend Setup
 1. Navigate to the frontend directory:
@@ -358,6 +399,7 @@ The development of Project SMRITI follows a capability-based progression:
 │   │   ├── claude.py
 │   │   ├── gemini.py
 │   │   └── generic.py
+│   ├── mcp_server.py             # Local read-only MCP stdio server (Phase 4.1)
 │   ├── memory_diff.py            # 5-way memory diff engine
 │   ├── memory_manager.py         # Lifecycle, provenance, and conflict resolution
 │   ├── models.py                 # SQLAlchemy canonical data models & VectorType
@@ -374,6 +416,7 @@ The development of Project SMRITI follows a capability-based progression:
     ├── test_phase2_project_intelligence.py
     ├── test_phase3_embeddings.py # Embedding providers and unit pagination tests
     ├── test_phase3_pgvector.py   # PostgreSQL + pgvector integration & pagination tests
+    ├── test_phase4_mcp_server.py # Local MCP server tool and transport tests
     └── test_smriti_core.py       # Core unit and round-trip tests
 ```
 
