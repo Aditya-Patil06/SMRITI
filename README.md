@@ -162,12 +162,16 @@ Exports can be executed globally or scoped to specific workspaces. Imports valid
 
 | Subsystem | Status | Implementation Details |
 | :--- | :--- | :--- |
-| **Database Migrations** | **IMPLEMENTED** | Alembic migration environment (`alembic/versions/84f31e60a4d2_initial_schema.py`) managing all models. |
-| **Persistent Vector Store** | **IMPLEMENTED** | Deterministic hashed embedding service + disk-backed JSON index with `rebuild_from_db()` recovery. |
+| **Database Migrations** | **IMPLEMENTED** | Alembic migration sequence (`84f31e60a4d2` initial schema, `c2b49b035a68` Phase 2, `5032740e5b4c` Phase 3 embeddings) managing all tables and indexes. |
+| **PostgreSQL & pgvector Store** | **IMPLEMENTED** | Production `PgVectorStore` with pgvector cosine distance (`<=>`), transparent proxy routing (`InMemoryVectorStore` fallback on SQLite), and index rebuild via `rebuild_from_db()`. |
+| **Bounded Filtered Vector Search** | **IMPLEMENTED** | Bounded SQL pagination (`LIMIT :limit OFFSET :offset`, `page_size = max(top_k * 2, 50)`) with deterministic `(distance, memory_id)` tie-breaking and early termination when post-filtering with `filter_fn`. |
+| **Embedding Providers** | **IMPLEMENTED** | `MockEmbeddingProvider` (deterministic unit testing & adversarial fixtures) and `LocalEmbeddingProvider` (using optional `sentence-transformers`, defaulting to `all-MiniLM-L6-v2`). |
 | **Workspace Isolation** | **IMPLEMENTED** | Multi-workspace boundaries enforced across database queries, vector searches, and context generation. |
-| **Complete Provenance** | **IMPLEMENTED** | Full traceability down to message, conversation, and provider account; manual memories correctly tagged. |
-| **Canonical Portability** | **IMPLEMENTED** | Zero-loss atomic export/import format (`v1.1.0`) with manifest validation and transactional safety. |
-| **API Integration Tests** | **IMPLEMENTED** | 18 automated unit and integration tests passing cleanly via `pytest`. |
+| **Complete Provenance** | **IMPLEMENTED** | Full traceability down to message, conversation, and provider account; manual memories tagged `user_explicit`. |
+| **Intelligent Memory Extraction** | **IMPLEMENTED** | Hybrid heuristic + LLM entity/relationship extraction, claim normalization, and replacement direction heuristics. |
+| **Conflict & Supersession Handling** | **IMPLEMENTED** | 5-way diff engine, structured supersession claim matching, coexistence edge persistence, and interactive conflict resolution. |
+| **Project State Synthesis** | **IMPLEMENTED** | Autonomous project state synthesis, milestone detection, and architecture overview tracking across active/superseded memories. |
+| **Canonical Portability** | **IMPLEMENTED** | Zero-loss atomic export/import format (`v1.1.0`) with manifest validation, scoped export, and transactional safety. |
 | **Web Control Center** | **IMPLEMENTED** | React + TypeScript + Vite control center providing Dashboard, Memory Bank, Graph Visualizer, and Context Generator. |
 | **Provider Importers** | **IMPLEMENTED** | Normalization parsers for ChatGPT, Claude, Gemini, and Generic standard formats. |
 | **Provider Adapters** | **PROTOTYPE** | Adapter layer providing prompt formatting and capability matrix discovery. |
@@ -176,71 +180,131 @@ Exports can be executed globally or scoped to specific workspaces. Imports valid
 
 ---
 
-## 9. Capability Roadmap
+## 9. Latest Project Update: Phase 3 Released
+
+**Phase 3: Advanced Retrieval & pgvector** has been merged into `main`.
+
+Key highlights of this release:
+- **Persistent PostgreSQL + pgvector Storage**: Introduced `PgVectorStore` for native in-database vector similarity search using the pgvector extension and cosine distance operations (`<=>`). When running on SQLite or environments without PostgreSQL, SMRITI automatically routes to `InMemoryVectorStore` with disk-backed JSON fallback.
+- **Bounded SQL-Level Vector Pagination**: Addressed unbounded candidate queries during post-filtering. Vector search with custom callback filtering (`filter_fn`) now executes bounded SQL pages (`LIMIT :limit OFFSET :offset`, with `page_size = max(top_k * 2, 50)`) and deterministic `(distance, e.memory_id)` tie-breaking, stopping early once `top_k` accepted matches are collected.
+- **Alembic Embedding Migration**: Migration `5032740e5b4c_phase_3_embeddings.py` creates the `embedding_metadata` table with idempotency constraints (`memory_id`, `model_name`, `model_version`, `content_hash`). On PostgreSQL, it builds production partial HNSW indexes (`vector_cosine_ops`) for supported dimensions (64, 384, 768). On SQLite/non-PostgreSQL databases, it falls back cleanly to JSON embedding storage.
+- **Configurable Embedding Providers**: Added `LocalEmbeddingProvider` powered by `sentence-transformers` (defaults to `all-MiniLM-L6-v2`, 384 dimensions), alongside `MockEmbeddingProvider` for deterministic offline testing.
+- **Hardened Test Suite**: The pagination regression suite was hardened with mathematically controlled unit-vector embeddings to eliminate hash collision fragility and ensure deterministic cross-page ranking across boundaries.
+
+---
+
+## 10. Capability Roadmap
 
 The development of Project SMRITI follows a capability-based progression:
 
-### Phase 1 — Core Reliability & Portability (Current)
+### Phase 1 — Core Reliability & Portability (Completed)
 - Database schema management via authoritative Alembic migrations.
 - Persistent vector storage with deterministic embeddings and rebuild capabilities.
 - Workspace and provider-account boundary isolation.
 - Comprehensive provenance tracking and explainability.
-- Atomic, validated canonical export/import engine.
+- Atomic, validated canonical export/import engine (`v1.1.0`).
 - Complete API integration test suite.
 
-### Phase 2 — Intelligent Memory & Extraction
+### Phase 2 — Intelligent Memory & Extraction (Completed)
 - Hybrid heuristic and LLM-assisted entity and relationship extraction.
 - Automatic project state synthesis and milestone detection.
 - Fine-grained memory diff detection (superseded, conflicting, new).
 - User-directed interactive conflict resolution workflows.
 
-### Phase 3 — Advanced Retrieval & Multi-Space Search
-- Deep vector search with upgradeable pgvector / local dense embedding models.
-- Graph-augmented retrieval with multi-hop topological reasoning.
-- Cross-workspace explicit sharing and selective subgraph publishing.
-- Staleness indicators and temporal memory decay algorithms.
+### Phase 3 — Advanced Retrieval & pgvector (Completed)
+- Persistent PostgreSQL vector storage via pgvector extension (`PgVectorStore`).
+- Production partial HNSW indexing for standard dimensions (64, 384, 768).
+- Bounded, paginated SQL vector search with callback post-filtering and deterministic tie-breaking.
+- Non-PostgreSQL compatibility using JSON embedding storage and in-memory vector store.
+- Local dense embedding models via optional `sentence-transformers` integration.
 
-### Phase 4 — Provider Integrations & MCP
+### Phase 4 — Provider Integrations & MCP (Next Planned Phase)
 - Formal Model Context Protocol (MCP) server integration for Claude and compatible agents.
 - Custom GPT actions and plugin endpoints for authorized ChatGPT access.
 - Official Gemini Extensions and Function Calling integrations.
 - Local model execution adapters (e.g., Ollama, vLLM).
+- Multi-hop graph-augmented topological retrieval reasoning.
+- Cross-workspace explicit sharing and selective subgraph publishing.
 
-### Phase 5 — Production Hardening & Encryption
+### Phase 5 — Production Hardening & Encryption (Future Phase)
 - Full PostgreSQL backend deployment profile.
 - End-to-end local field encryption for sensitive memory rationales and conversation snippets.
 - Granular role-based access control and multi-user authentication.
 - Automated secret and PII redaction during ingestion.
+- Staleness indicators and temporal memory decay algorithms.
 
 ---
 
-## 10. Local Setup & Testing
+## 11. Local Setup & Testing
 
 ### Prerequisites
 - Python 3.10+
 - Node.js 18+ and npm
+- *(Optional for Phase 3 PostgreSQL/pgvector)*: PostgreSQL 15+ with the `pgvector` extension installed (e.g., the official `pgvector/pgvector:pg16` Docker image).
 
 ### Backend Setup
-1. Clone the repository:
+
+1. **Clone the repository**:
    ```bash
    git clone https://github.com/Aditya-Patil06/SMRITI.git
    cd SMRITI
    ```
-2. Install Python dependencies:
-   ```bash
-   pip install -e ".[dev]"
-   # Or install dependencies directly:
-   pip install fastapi uvicorn sqlalchemy alembic networkx numpy pytest httpx
-   ```
-3. Apply database migrations:
+
+2. **Install Python dependencies**:
+   - **Lightweight SQLite Development Workflow** (no PostgreSQL, no ML dependencies):
+     ```bash
+     pip install -e ".[dev]"
+     ```
+   - **SQLite with Semantic Local Embeddings** (no PostgreSQL required):
+     ```bash
+     pip install -e ".[dev]"
+     pip install sentence-transformers
+     ```
+   - **Full Phase 3 Workflow** (PostgreSQL, pgvector, and local `sentence-transformers` embeddings):
+     ```bash
+     pip install -e ".[dev,phase3]"
+     ```
+     *Note: The `phase3` extra bundles `pgvector`, `psycopg[binary]`, and `sentence-transformers`.*
+
+3. **Configure Database & Embeddings**:
+   By default, `smriti/config.py` targets SQLite (`sqlite:///./smriti.db`) but configures `SMRITI_EMBEDDING_PROVIDER="local"`. Configure your environment according to your workflow (examples show Bash-compatible syntax; on Windows PowerShell, use `$env:VARIABLE="value"`):
+   - **Lightweight SQLite Workflow (Mock Embeddings)**:
+     If using only `.[dev]` without `sentence-transformers`, set the embedding provider to `mock`:
+     ```bash
+     export SMRITI_EMBEDDING_PROVIDER="mock"
+     ```
+     *Note: The mock provider uses deterministic bag-of-words MD5 hashing. It is designed for lightweight, deterministic offline testing and development, and is not equivalent to semantic dense embeddings.*
+   - **SQLite with Local Semantic Embeddings**:
+     If you installed `sentence-transformers`, local semantic embeddings run directly against SQLite without requiring PostgreSQL:
+     ```bash
+     export SMRITI_EMBEDDING_PROVIDER="local"
+     export SMRITI_EMBEDDING_MODEL="all-MiniLM-L6-v2"
+     ```
+   - **Full PostgreSQL + pgvector Workflow**:
+     ```bash
+     export SMRITI_DATABASE_URL="postgresql://postgres:postgrespassword@localhost:5432/smriti_test"
+     export SMRITI_EMBEDDING_PROVIDER="local"
+     export SMRITI_EMBEDDING_MODEL="all-MiniLM-L6-v2"
+     ```
+
+4. **Apply database migrations**:
    ```bash
    alembic upgrade head
    ```
-4. Run tests:
-   ```bash
-   pytest
-   ```
-5. Start the SMRITI API server:
+
+5. **Run test suite**:
+   - **Local Verification (Layer A SQLite)**:
+     ```bash
+     pytest -v
+     ```
+     *In local environments without PostgreSQL running (`SMRITI_PG_TESTS` unset), the PostgreSQL integration suite is skipped automatically. Local validation yields **72 passed, 17 skipped** across the entire repository (embedding tests: **5 passed, 1 skipped**).*
+   - **Continuous Integration (CI — GitHub Actions)**:
+     The GitHub Actions CI pipeline tests both Layer A and Layer B:
+     1. Runs Layer A SQLite tests (`pytest -q --ignore=tests/test_phase3_pgvector.py`).
+     2. Runs Alembic migrations on a live `pgvector/pgvector:pg16` PostgreSQL container (`alembic upgrade head`).
+     3. Runs Layer B PostgreSQL + pgvector tests (`SMRITI_PG_TESTS=1 pytest tests/test_phase3_pgvector.py -v -s`).
+
+6. **Start the SMRITI API server**:
    ```bash
    uvicorn smriti.api:app --reload --port 8000
    ```
@@ -262,13 +326,16 @@ The development of Project SMRITI follows a capability-based progression:
 
 ---
 
-## 11. Repository Structure
+## 12. Repository Structure
 
 ```text
 .
 ├── alembic/                      # Database migrations
 │   ├── env.py                    # Alembic migration environment
 │   └── versions/                 # Versioned migration revisions
+│       ├── 84f31e60a4d2_initial_schema.py
+│       ├── c2b49b035a68_phase_2_intelligent_memory.py
+│       └── 5032740e5b4c_phase_3_embeddings.py
 ├── alembic.ini                   # Alembic configuration
 ├── frontend/                     # Web Control Center (React + TypeScript + Vite)
 │   ├── src/
@@ -283,6 +350,7 @@ The development of Project SMRITI follows a capability-based progression:
 │   ├── canonical_export.py       # Zero-loss export/import engine
 │   ├── config.py                 # Configuration and environment settings
 │   ├── context_engine.py         # Portable context package synthesizer
+│   ├── embeddings.py             # Mock and Local sentence-transformers embeddings
 │   ├── extraction.py             # Memory candidate extraction
 │   ├── graph.py                  # NetworkX knowledge graph service
 │   ├── importers/                # Multi-provider conversation parsers
@@ -290,20 +358,28 @@ The development of Project SMRITI follows a capability-based progression:
 │   │   ├── claude.py
 │   │   ├── gemini.py
 │   │   └── generic.py
+│   ├── memory_diff.py            # 5-way memory diff engine
 │   ├── memory_manager.py         # Lifecycle, provenance, and conflict resolution
-│   ├── models.py                 # SQLAlchemy canonical data models
+│   ├── models.py                 # SQLAlchemy canonical data models & VectorType
+│   ├── project_intelligence.py   # Project state synthesis & milestone detection
 │   ├── providers/                # Provider adapters and capabilities
 │   ├── retrieval.py              # Hybrid retrieval (lexical + vector + graph)
 │   ├── schemas.py                # Pydantic V2 schemas
-│   └── vector_store.py           # Persistent vector store and embeddings
+│   └── vector_store.py           # Persistent vector stores (PgVectorStore & InMemoryVectorStore)
 └── tests/                        # Automated test suites
     ├── test_api_integration.py   # API integration, isolation, and portability tests
+    ├── test_phase2_commit_28d842b_regression.py
+    ├── test_phase2_diff_and_conflicts.py
+    ├── test_phase2_extraction.py
+    ├── test_phase2_project_intelligence.py
+    ├── test_phase3_embeddings.py # Embedding providers and unit pagination tests
+    ├── test_phase3_pgvector.py   # PostgreSQL + pgvector integration & pagination tests
     └── test_smriti_core.py       # Core unit and round-trip tests
 ```
 
 ---
 
-## 12. Privacy & Security Principles
+## 13. Privacy & Security Principles
 
 * **Local-First**: All relational records, vector indices, and knowledge graphs reside on user-controlled hardware.
 * **No Credential Ingestion**: SMRITI never asks for, stores, or handles raw AI provider account passwords.
