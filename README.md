@@ -305,7 +305,7 @@ The development of Project SMRITI follows a capability-based progression:
      ```bash
      pytest -v
      ```
-     *In local environments without PostgreSQL running (`SMRITI_PG_TESTS` unset), the PostgreSQL integration suite is skipped automatically. Local validation yields **81 passed, 17 skipped** across the entire repository (MCP tests: **9 passed**; embedding tests: **5 passed, 1 skipped**).*
+     *In local environments without PostgreSQL running (SMRITI_PG_TESTS unset), the PostgreSQL integration suite (16 tests) is skipped automatically along with 1 optional local embedding test. Local validation yields **85 passed, 17 skipped, 1 warning** across the entire repository (MCP tests: **13 passed, 1 warning**; embedding tests: **5 passed, 1 skipped**).*
    - **Continuous Integration (CI — GitHub Actions)**:
      The GitHub Actions CI pipeline tests both Layer A and Layer B:
      1. Runs Layer A SQLite tests including MCP server tests (`pytest -q --ignore=tests/test_phase3_pgvector.py`).
