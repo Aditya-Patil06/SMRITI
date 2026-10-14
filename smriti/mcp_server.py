@@ -447,7 +447,7 @@ def main() -> None:
         action="store_true",
         help="Execute administrative initialization and index rebuild, then exit without starting stdio server",
     )
-    args, unknown = parser.parse_known_args()
+    args, _ = parser.parse_known_args()
 
     allow_write = args.init_db or args.init_only
     rebuild = args.rebuild_indices or args.init_only
