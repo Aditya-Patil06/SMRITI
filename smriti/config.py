@@ -1,6 +1,6 @@
 import os
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
 
 class Settings(BaseModel):
     env: str = Field(default=os.getenv("SMRITI_ENV", "development"))
@@ -16,5 +16,6 @@ class Settings(BaseModel):
     ])
     embedding_provider: str = Field(default=os.getenv("SMRITI_EMBEDDING_PROVIDER", "local"))
     embedding_model: str = Field(default=os.getenv("SMRITI_EMBEDDING_MODEL", "all-MiniLM-L6-v2"))
+    mcp_user_id: Optional[str] = Field(default=os.getenv("SMRITI_MCP_USER_ID"))
 
 settings = Settings()

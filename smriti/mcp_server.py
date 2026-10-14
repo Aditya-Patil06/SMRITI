@@ -4,6 +4,7 @@ Provides a local stdio MCP server for Claude Desktop and compatible MCP clients
 to access SMRITI workspaces, projects, hybrid memory search, and synthesized context packages.
 """
 
+import argparse
 from contextlib import contextmanager
 import logging
 import os
@@ -13,11 +14,13 @@ from typing import Any, Dict, Generator, List, Optional
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import StrictBool, StrictInt, StrictStr
+from sqlalchemy import inspect
 from sqlalchemy.orm import Session
 
+from smriti.config import settings
 from smriti.context_engine import context_engine
 from smriti.graph import graph_service
-from smriti.models import Project, SessionLocal, Workspace, init_db
+from smriti.models import Project, SessionLocal, User, Workspace, engine, init_db
 from smriti.retrieval import retrieval_engine
 from smriti.vector_store import vector_store
 
@@ -33,21 +36,79 @@ logger = logging.getLogger("smriti.mcp_server")
 _bootstrap_completed = False
 
 
-def bootstrap_server() -> None:
-    """Initialize database tables and sync graph/vector stores if needed."""
+def check_database_initialized(db: Session) -> None:
+    """Verify that required database schema tables exist before running read-only operations."""
+    target_engine = db.get_bind() if hasattr(db, "get_bind") else engine
+    insp = inspect(target_engine)
+    required_tables = ("users", "workspaces", "projects", "memories")
+    missing_tables = [t for t in required_tables if not insp.has_table(t)]
+    if missing_tables:
+        raise RuntimeError(
+            f"SMRITI database is not initialized (missing tables: {missing_tables}). "
+            "Run 'python -m smriti.mcp_server --init-db' or the SMRITI API/migrations to prepare the database."
+        )
+
+
+
+def get_active_mcp_user_id(db: Session) -> Optional[str]:
+    """Retrieve and validate the configured or default MCP user ID."""
+    configured_user_id = os.getenv("SMRITI_MCP_USER_ID") or settings.mcp_user_id
+    if configured_user_id:
+        clean_user_id = configured_user_id.strip()
+        if not clean_user_id:
+            raise RuntimeError(
+                "SMRITI_MCP_USER_ID is set but empty. Provide a valid user ID or leave unset."
+            )
+        user = db.query(User).filter(User.id == clean_user_id).first()
+        if not user:
+            raise RuntimeError(
+                f"Configured SMRITI_MCP_USER_ID '{clean_user_id}' does not exist in the database."
+            )
+        return clean_user_id
+
+    # If no explicit SMRITI_MCP_USER_ID is provided, inspect existing users
+    all_users = db.query(User).all()
+    if not all_users:
+        raise RuntimeError(
+            "SMRITI database has no registered users. "
+            "Run administrative initialization ('python -m smriti.mcp_server --init-db') before starting the server."
+        )
+    if len(all_users) == 1:
+        return all_users[0].id
+
+    # Multiple users found and no SMRITI_MCP_USER_ID specified
+    raise RuntimeError(
+        f"Multiple users ({len(all_users)}) exist in the database. "
+        "You must configure SMRITI_MCP_USER_ID to isolate the MCP session to a specific user."
+    )
+
+
+def bootstrap_server(allow_write_init: bool = False, rebuild_indices: bool = False) -> None:
+    """Validate database readiness and sync in-memory graph.
+
+    By default, ordinary MCP server startup is strictly read-only and will never execute DDL,
+    seed users/workspaces, or rebuild persistent vector files.
+    """
     global _bootstrap_completed
     if _bootstrap_completed:
         return
 
-    logger.info("Bootstrapping SMRITI database and memory indices...")
-    init_db()
+    if allow_write_init:
+        logger.info("Executing administrative database initialization (--init-db)...")
+        init_db()
 
     db: Session = SessionLocal()
     try:
+        check_database_initialized(db)
+
+        if rebuild_indices:
+            logger.info("Rebuilding vector store indices from database (--rebuild-indices)...")
+            vector_store.rebuild_from_db(db)
+
+        # In-memory graph sync is a read-only projection into memory
         graph_service.sync_from_db(db)
-        vector_store.rebuild_from_db(db)
         _bootstrap_completed = True
-        logger.info("SMRITI bootstrap completed successfully.")
+        logger.info("SMRITI read-only startup verification completed successfully.")
     except Exception:
         logger.exception("Failed during SMRITI bootstrap")
         raise
@@ -112,9 +173,15 @@ def validate_limit(limit: Any) -> int:
 
 
 def get_verified_workspace(db: Session, workspace_id: str) -> Workspace:
-    """Look up a workspace by id or raise ToolError if missing."""
-    workspace = db.query(Workspace).filter(Workspace.id == workspace_id).first()
+    """Look up a workspace by id and verify ownership by the active MCP user."""
+    active_user_id = get_active_mcp_user_id(db)
+    query = db.query(Workspace).filter(Workspace.id == workspace_id)
+    if active_user_id:
+        query = query.filter(Workspace.user_id == active_user_id)
+
+    workspace = query.first()
     if not workspace:
+        # Uniform safe error message for missing or unauthorized workspaces
         raise ToolError(f"Workspace not found: '{workspace_id}'")
     return workspace
 
@@ -128,10 +195,14 @@ def get_verified_project(db: Session, project_id: str, workspace_id: str) -> Pro
 
 
 def execute_list_workspaces() -> Dict[str, Any]:
-    """Execute list_workspaces business logic."""
+    """Execute list_workspaces scoped strictly to the authenticated/configured user."""
     try:
         with get_db_session() as db:
-            workspaces = db.query(Workspace).order_by(Workspace.created_at.asc()).all()
+            active_user_id = get_active_mcp_user_id(db)
+            query = db.query(Workspace)
+            if active_user_id:
+                query = query.filter(Workspace.user_id == active_user_id)
+            workspaces = query.order_by(Workspace.created_at.asc()).all()
             result = [
                 {
                     "id": w.id,
@@ -150,7 +221,7 @@ def execute_list_workspaces() -> Dict[str, Any]:
 
 
 def execute_list_projects(workspace_id: StrictStr) -> Dict[str, Any]:
-    """Execute list_projects business logic."""
+    """Execute list_projects business logic after validating workspace ownership."""
     w_id = validate_string_identifier(workspace_id, "workspace_id")
     try:
         with get_db_session() as db:
@@ -187,7 +258,7 @@ def execute_search_memories(
     limit: StrictInt = 15,
     include_superseded: StrictBool = False,
 ) -> Dict[str, Any]:
-    """Execute search_memories business logic."""
+    """Execute search_memories business logic after validating workspace ownership."""
     q = validate_string_identifier(query, "query", max_length=2000)
     w_id = validate_string_identifier(workspace_id, "workspace_id")
     p_id = validate_optional_string(project_id, "project_id", max_length=255)
@@ -236,7 +307,7 @@ def execute_build_context_package(
     query: Optional[StrictStr] = None,
     task_description: Optional[StrictStr] = None,
 ) -> Dict[str, Any]:
-    """Execute build_context_package business logic."""
+    """Execute build_context_package business logic after validating workspace ownership."""
     w_id = validate_string_identifier(workspace_id, "workspace_id")
     p_id = validate_string_identifier(project_id, "project_id")
     q_cleaned = validate_optional_string(query, "query", max_length=2000) or ""
@@ -359,10 +430,37 @@ mcp_server = create_mcp_server()
 
 
 def main() -> None:
-    """Run the SMRITI MCP server using stdio transport."""
-    bootstrap_server()
+    """Run the SMRITI MCP server using stdio transport or execute administrative initialization."""
+    parser = argparse.ArgumentParser(description="SMRITI Model Context Protocol (MCP) server")
+    parser.add_argument(
+        "--init-db",
+        action="store_true",
+        help="Explicitly initialize database tables and seed default entities",
+    )
+    parser.add_argument(
+        "--rebuild-indices",
+        action="store_true",
+        help="Explicitly rebuild vector store and graph indices from the database",
+    )
+    parser.add_argument(
+        "--init-only",
+        action="store_true",
+        help="Execute administrative initialization and index rebuild, then exit without starting stdio server",
+    )
+    args, unknown = parser.parse_known_args()
+
+    allow_write = args.init_db or args.init_only
+    rebuild = args.rebuild_indices or args.init_only
+
+    bootstrap_server(allow_write_init=allow_write, rebuild_indices=rebuild)
+
+    if args.init_only:
+        logger.info("Administrative initialization completed. Exiting.")
+        return
+
     logger.info("Starting SMRITI MCP server on stdio transport...")
     mcp_server.run(transport="stdio")
+
 
 
 if __name__ == "__main__":

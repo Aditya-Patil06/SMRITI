@@ -14,6 +14,7 @@ Validates:
 import asyncio
 from datetime import datetime, timezone
 import json
+import os
 import pytest
 import anyio
 
@@ -659,6 +660,28 @@ async def test_mcp_subprocess_stdio_launch(tmp_path):
     db_url = f"sqlite:///{db_file}"
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
+    # Explicitly prepare test DB schema and default entities prior to read-only subprocess launch
+    from sqlalchemy import create_engine
+    from smriti.models import Base, User, Workspace
+    from sqlalchemy.orm import sessionmaker
+
+    prep_engine = create_engine(db_url)
+    Base.metadata.create_all(prep_engine)
+    PrepSession = sessionmaker(bind=prep_engine)
+    with PrepSession() as prep_db:
+        prep_user = User(id="default-user", username="smriti_user", email="user@smriti.local")
+        prep_db.add(prep_user)
+        prep_ws = Workspace(
+            id="default-workspace",
+            user_id="default-user",
+            name="Personal Workspace",
+            description="Default local personal memory space",
+            is_default=True,
+        )
+        prep_db.add(prep_ws)
+        prep_db.commit()
+    prep_engine.dispose()
+
     # Construct a minimal, isolated environment without leaking host AI provider credentials
     isolated_env = {}
     # Retain standard platform / system environment variables required for Windows and Python
@@ -721,3 +744,166 @@ async def test_mcp_subprocess_stdio_launch(tmp_path):
             assert "workspaces" in data
             assert len(data["workspaces"]) >= 1
             assert data["workspaces"][0]["name"] == "Personal Workspace"
+
+
+@pytest.mark.asyncio
+async def test_mcp_startup_read_only_guarantee(tmp_path, monkeypatch):
+    """Verify that ordinary bootstrap_server does not modify the database or write files."""
+    from sqlalchemy import create_engine
+    from smriti.models import Base, User, Workspace, Memory
+    from sqlalchemy.orm import sessionmaker
+
+    db_path = str(tmp_path / "readonly_test.db")
+    test_engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(test_engine)
+    TestingSession = sessionmaker(bind=test_engine)
+
+    # Seed an existing user, workspace, and memory
+    with TestingSession() as db:
+        user = User(id="user-ro", username="ro_user", email="ro@smriti.local")
+        db.add(user)
+        ws = Workspace(id="ws-ro", user_id="user-ro", name="RO Workspace")
+        db.add(ws)
+        mem = Memory(
+            id="mem-ro",
+            workspace_id="ws-ro",
+            memory_type="decision",
+            statement="Read-only test memory",
+            status="active",
+        )
+        db.add(mem)
+        db.commit()
+
+
+    # Track vector store file path
+    vec_path = str(tmp_path / "never_created_vectors.json")
+    monkeypatch.setattr(vector_store, "storage_path", vec_path)
+    monkeypatch.setattr(mcp_server_module, "SessionLocal", TestingSession)
+    monkeypatch.setattr(mcp_server_module, "_bootstrap_completed", False)
+    monkeypatch.setenv("SMRITI_MCP_USER_ID", "user-ro")
+
+    # Run ordinary bootstrap_server
+    mcp_server_module.bootstrap_server()
+
+    # Verify vector file was NOT created or modified by ordinary bootstrap
+    assert not os.path.exists(vec_path)
+
+    # Verify no new users or workspaces were seeded
+    with TestingSession() as db:
+        assert db.query(User).count() == 1
+        assert db.query(Workspace).count() == 1
+        assert db.query(User).first().id == "user-ro"
+
+    test_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mcp_startup_fails_on_uninitialized_database(tmp_path, monkeypatch):
+    """Verify that ordinary bootstrap fails with a clear error on an uninitialized database."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    empty_db_path = str(tmp_path / "empty.db")
+    empty_engine = create_engine(f"sqlite:///{empty_db_path}")
+    EmptySession = sessionmaker(bind=empty_engine)
+
+    monkeypatch.setattr(mcp_server_module, "SessionLocal", EmptySession)
+    monkeypatch.setattr(mcp_server_module, "_bootstrap_completed", False)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        mcp_server_module.bootstrap_server()
+
+    assert "SMRITI database is not initialized" in str(exc_info.value)
+    assert "--init-db" in str(exc_info.value)
+    empty_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mcp_multi_user_workspace_isolation(tmp_path, monkeypatch):
+    """Verify that a caller configured as User A cannot list or access User B's workspaces."""
+    from sqlalchemy import create_engine
+    from smriti.models import Base, User, Workspace, Project, Memory
+    from sqlalchemy.orm import sessionmaker
+
+    multi_engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(multi_engine)
+    MultiSession = sessionmaker(bind=multi_engine)
+
+    with MultiSession() as db:
+        user_alice = User(id="user-alice", username="alice", email="alice@smriti.local")
+        user_bob = User(id="user-bob", username="bob", email="bob@smriti.local")
+        db.add_all([user_alice, user_bob])
+
+        ws_alice = Workspace(id="ws-alice", user_id="user-alice", name="Alice Private")
+        ws_bob = Workspace(id="ws-bob", user_id="user-bob", name="Bob Secrets")
+        db.add_all([ws_alice, ws_bob])
+
+        proj_bob = Project(
+            id="proj-bob",
+            workspace_id="ws-bob",
+            name="Bob Secret Project",
+            status="active",
+        )
+        db.add(proj_bob)
+
+        mem_bob = Memory(
+            id="mem-bob",
+            workspace_id="ws-bob",
+            project_id="proj-bob",
+            memory_type="decision",
+            statement="Bob confidential plan",
+            status="active",
+        )
+        db.add(mem_bob)
+        db.commit()
+
+
+    monkeypatch.setattr(mcp_server_module, "SessionLocal", MultiSession)
+    monkeypatch.setattr(mcp_server_module, "_bootstrap_completed", True)
+
+    # 1. Configured as Alice
+    monkeypatch.setenv("SMRITI_MCP_USER_ID", "user-alice")
+    server = create_mcp_server()
+
+    # Alice lists workspaces: should only see ws-alice
+    res = await server.call_tool("list_workspaces", {})
+    workspaces = json.loads(res.content[0].text)["workspaces"]
+    assert len(workspaces) == 1
+    assert workspaces[0]["id"] == "ws-alice"
+    assert all(w["id"] != "ws-bob" for w in workspaces)
+
+    # Alice attempts to access Bob's workspace in list_projects: rejected
+    with pytest.raises(ToolError) as exc_p:
+        await server.call_tool("list_projects", {"workspace_id": "ws-bob"})
+    assert "Workspace not found" in str(exc_p.value)
+
+    # Alice attempts to search memories in Bob's workspace: rejected
+    with pytest.raises(ToolError) as exc_s:
+        await server.call_tool("search_memories", {
+            "query": "confidential",
+            "workspace_id": "ws-bob",
+        })
+    assert "Workspace not found" in str(exc_s.value)
+
+    # Alice attempts to build context package in Bob's workspace: rejected
+    with pytest.raises(ToolError) as exc_c:
+        await server.call_tool("build_context_package", {
+            "workspace_id": "ws-bob",
+            "project_id": "proj-bob",
+        })
+    assert "Workspace not found" in str(exc_c.value)
+
+    # 2. Multi-user database without SMRITI_MCP_USER_ID raises error on startup
+    monkeypatch.delenv("SMRITI_MCP_USER_ID", raising=False)
+    monkeypatch.setattr(mcp_server_module.settings, "mcp_user_id", None)
+    with MultiSession() as db:
+        with pytest.raises(RuntimeError) as exc_multi:
+            mcp_server_module.get_active_mcp_user_id(db)
+        assert "Multiple users (2) exist" in str(exc_multi.value)
+        assert "configure SMRITI_MCP_USER_ID" in str(exc_multi.value)
+
+    multi_engine.dispose()
