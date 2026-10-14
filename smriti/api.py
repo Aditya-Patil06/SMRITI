@@ -315,8 +315,20 @@ def list_memories(
         q = q.filter(Memory.memory_type == memory_type)
     return q.order_by(Memory.updated_at.desc()).all()
 
+def _serialize_structured_claim(claim: Any) -> Optional[Dict[str, Any]]:
+    """Convert a structured claim into a dictionary or return None."""
+    if claim is None:
+        return None
+    if hasattr(claim, "model_dump"):
+        return claim.model_dump()
+    if isinstance(claim, dict):
+        return claim
+    return dict(claim)
+
+
 @app.post("/api/v1/memories", response_model=MemoryRead, status_code=status.HTTP_201_CREATED)
 def create_memory(data: MemoryCreate, db: Session = Depends(get_db)):
+    """Create a new memory and update the vector store and graph."""
     ws_id = data.workspace_id or "default-workspace"
     ws = db.query(Workspace).filter(Workspace.id == ws_id).first()
     if not ws:
@@ -333,14 +345,7 @@ def create_memory(data: MemoryCreate, db: Session = Depends(get_db)):
     if not data.source_message_id and not data.source_conversation_id:
         extraction_method = "user_explicit"
 
-    claim_data = None
-    if data.structured_claim is not None:
-        if hasattr(data.structured_claim, "model_dump"):
-            claim_data = data.structured_claim.model_dump()
-        elif isinstance(data.structured_claim, dict):
-            claim_data = data.structured_claim
-        else:
-            claim_data = dict(data.structured_claim)
+    claim_data = _serialize_structured_claim(data.structured_claim)
 
     mem = Memory(
         workspace_id=ws_id,
