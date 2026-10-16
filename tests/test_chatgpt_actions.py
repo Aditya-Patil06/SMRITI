@@ -640,3 +640,117 @@ def test_missing_optional_json_cache_file_does_not_fail(auth_client, monkeypatch
     # Search should succeed (returning empty or lexical results) without raising 503
     res = auth_client.get("/actions/search?query=PostgreSQL&workspace_id=ws-u1", headers=headers)
     assert res.status_code == 200
+
+
+def test_syntactically_valid_json_with_missing_vector_fails_closed_with_503(auth_client):
+    """Syntactically valid JSON where an entry misses the 'vector' key fails closed with HTTP 503."""
+    headers = {"Authorization": f"Bearer {TEST_ACTIONS_API_KEY}"}
+    v_path = vector_store.storage_path
+    payload = {
+        "mem-u1-1": {
+            "metadata": {"workspace_id": "ws-u1", "status": "active"}
+            # Missing "vector" key
+        }
+    }
+    with open(v_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+
+    res = auth_client.get("/actions/search?query=PostgreSQL&workspace_id=ws-u1", headers=headers)
+    assert res.status_code == 503
+    assert res.json().get("detail") == "Memory search cache is currently unavailable."
+
+
+def test_syntactically_valid_json_with_malformed_metadata_fails_closed_with_503(auth_client):
+    """Syntactically valid JSON where metadata is not a dictionary fails closed with HTTP 503."""
+    headers = {"Authorization": f"Bearer {TEST_ACTIONS_API_KEY}"}
+    v_path = vector_store.storage_path
+    target_vs = smriti.vector_store.get_vector_store()
+    dim = target_vs.embedding_provider.dimension
+    payload = {
+        "mem-u1-1": {
+            "vector": [0.1] * dim,
+            "metadata": "not-a-dict-string"  # Malformed metadata type
+        }
+    }
+    with open(v_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+
+    res = auth_client.get("/actions/search?query=PostgreSQL&workspace_id=ws-u1", headers=headers)
+    assert res.status_code == 503
+    assert res.json().get("detail") == "Memory search cache is currently unavailable."
+
+
+def test_syntactically_valid_json_with_incompatible_dimension_fails_closed_with_503(auth_client):
+    """Syntactically valid JSON with incompatible vector embedding dimension fails closed with HTTP 503."""
+    headers = {"Authorization": f"Bearer {TEST_ACTIONS_API_KEY}"}
+    v_path = vector_store.storage_path
+    target_vs = smriti.vector_store.get_vector_store()
+    dim = target_vs.embedding_provider.dimension
+    payload = {
+        "mem-u1-1": {
+            "vector": [0.1] * (dim + 5),  # Incompatible dimension
+            "metadata": {"workspace_id": "ws-u1", "status": "active"}
+        }
+    }
+    with open(v_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+
+    res = auth_client.get("/actions/search?query=PostgreSQL&workspace_id=ws-u1", headers=headers)
+    assert res.status_code == 503
+    assert res.json().get("detail") == "Memory search cache is currently unavailable."
+
+
+def test_syntactically_valid_json_with_boolean_vector_element_fails_closed_with_503(auth_client):
+    """Syntactically valid JSON with boolean vector elements fails closed with HTTP 503."""
+    headers = {"Authorization": f"Bearer {TEST_ACTIONS_API_KEY}"}
+    v_path = vector_store.storage_path
+    target_vs = smriti.vector_store.get_vector_store()
+    dim = target_vs.embedding_provider.dimension
+    vec = [0.1] * (dim - 1) + [True]  # Boolean element in vector
+    payload = {
+        "mem-u1-1": {
+            "vector": vec,
+            "metadata": {"workspace_id": "ws-u1", "status": "active"}
+        }
+    }
+    with open(v_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+
+    res = auth_client.get("/actions/search?query=PostgreSQL&workspace_id=ws-u1", headers=headers)
+    assert res.status_code == 503
+    assert res.json().get("detail") == "Memory search cache is currently unavailable."
+
+
+def test_syntactically_valid_json_with_nan_or_infinite_vector_element_fails_closed_with_503(auth_client):
+    """Syntactically valid JSON with NaN or Infinity vector elements fails closed with HTTP 503."""
+    headers = {"Authorization": f"Bearer {TEST_ACTIONS_API_KEY}"}
+    v_path = vector_store.storage_path
+    target_vs = smriti.vector_store.get_vector_store()
+    dim = target_vs.embedding_provider.dimension
+
+    # 1. Test NaN
+    vec_nan = [0.1] * (dim - 1) + [float("nan")]
+    with open(v_path, "w", encoding="utf-8") as f:
+        json.dump({"mem-u1-1": {"vector": vec_nan, "metadata": {}}}, f)
+
+    res_nan = auth_client.get("/actions/search?query=PostgreSQL&workspace_id=ws-u1", headers=headers)
+    assert res_nan.status_code == 503
+    assert res_nan.json().get("detail") == "Memory search cache is currently unavailable."
+
+    # 2. Test +Infinity
+    vec_inf = [0.1] * (dim - 1) + [float("inf")]
+    with open(v_path, "w", encoding="utf-8") as f:
+        json.dump({"mem-u1-1": {"vector": vec_inf, "metadata": {}}}, f)
+
+    res_inf = auth_client.get("/actions/search?query=PostgreSQL&workspace_id=ws-u1", headers=headers)
+    assert res_inf.status_code == 503
+    assert res_inf.json().get("detail") == "Memory search cache is currently unavailable."
+
+    # 3. Test -Infinity
+    vec_ninf = [0.1] * (dim - 1) + [float("-inf")]
+    with open(v_path, "w", encoding="utf-8") as f:
+        json.dump({"mem-u1-1": {"vector": vec_ninf, "metadata": {}}}, f)
+
+    res_ninf = auth_client.get("/actions/search?query=PostgreSQL&workspace_id=ws-u1", headers=headers)
+    assert res_ninf.status_code == 503
+    assert res_ninf.json().get("detail") == "Memory search cache is currently unavailable."

@@ -7,6 +7,7 @@ schema for ChatGPT Custom GPT Actions.
 from contextlib import asynccontextmanager
 import json
 import logging
+import math
 import os
 import secrets
 import sys
@@ -179,10 +180,11 @@ def refresh_caches_if_needed(db: Session) -> None:
     global _last_vector_signature
 
     # 1. Read-only vector file signature reload (only for JSON-backed in-memory store)
+    active_vs = get_vector_store()
     storage_path = getattr(vector_store, "storage_path", None)
     load_fn = getattr(vector_store, "load", None)
     if (
-        isinstance(get_vector_store(), InMemoryVectorStore)
+        isinstance(active_vs, InMemoryVectorStore)
         and callable(load_fn)
         and storage_path
         and os.path.exists(storage_path)
@@ -191,15 +193,38 @@ def refresh_caches_if_needed(db: Session) -> None:
             stat_res = os.stat(storage_path)
             sig = (stat_res.st_mtime_ns, stat_res.st_size)
             if _last_vector_signature is None or sig != _last_vector_signature:
-                # Pre-validate file read and JSON parsing because InMemoryVectorStore.load()
-                # suppresses exceptions and silently clears vectors to {} on corruption.
+                # Pre-validate file read, JSON parsing, and per-entry structure/dimension/types
+                # because InMemoryVectorStore.load() suppresses exceptions and silently clears
+                # vectors to {} on corruption or validation failure.
                 try:
                     with open(storage_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
                     if not isinstance(data, dict):
                         raise ValueError("Vector cache payload must be a JSON object mapping doc IDs.")
+
+                    # Validate per-entry structure, vector dimension, and metadata
+                    expected_dim = getattr(active_vs.embedding_provider, "dimension", None)
+                    for doc_id, item in data.items():
+                        if not isinstance(item, dict):
+                            raise ValueError(f"Entry '{doc_id}' in vector cache must be an object.")
+                        if "vector" not in item:
+                            raise ValueError(f"Entry '{doc_id}' missing required 'vector' field.")
+                        vec_raw = item["vector"]
+                        if not isinstance(vec_raw, (list, tuple)):
+                            raise ValueError(f"Entry '{doc_id}' vector must be a list of floats.")
+                        if expected_dim is not None and len(vec_raw) != expected_dim:
+                            raise ValueError(
+                                f"Entry '{doc_id}' vector dimension mismatch: expected {expected_dim}, got {len(vec_raw)}."
+                            )
+                        # Verify elements are real, finite numeric values (reject bool, NaN, +/-inf)
+                        for elem in vec_raw:
+                            if isinstance(elem, bool) or not isinstance(elem, (int, float)) or not math.isfinite(elem):
+                                raise ValueError(f"Entry '{doc_id}' vector contains non-finite or non-numeric element: {elem!r}")
+                        # Verify metadata if present
+                        if "metadata" in item and not isinstance(item["metadata"], dict):
+                            raise ValueError(f"Entry '{doc_id}' metadata must be a dictionary.")
                 except Exception as parse_err:
-                    logger.exception("Corrupted or unreadable vector store cache file detected")
+                    logger.exception("Corrupted, malformed, or dimension-incompatible vector store cache file detected")
                     raise HTTPException(
                         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                         detail="Memory search cache is currently unavailable.",
