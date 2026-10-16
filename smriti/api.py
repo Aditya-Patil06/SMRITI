@@ -304,6 +304,7 @@ def list_memories(
     memory_type: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
+    """List non-forgotten memories with optional workspace, project, status, and type filters."""
     q = db.query(Memory).filter(Memory.status != "forgotten")
     if workspace_id:
         q = q.filter(Memory.workspace_id == workspace_id)
