@@ -17,5 +17,7 @@ class Settings(BaseModel):
     embedding_provider: str = Field(default=os.getenv("SMRITI_EMBEDDING_PROVIDER", "local"))
     embedding_model: str = Field(default=os.getenv("SMRITI_EMBEDDING_MODEL", "all-MiniLM-L6-v2"))
     mcp_user_id: Optional[str] = Field(default=os.getenv("SMRITI_MCP_USER_ID"))
+    actions_api_key: Optional[str] = Field(default=os.getenv("SMRITI_ACTIONS_API_KEY"))
+    actions_user_id: Optional[str] = Field(default=os.getenv("SMRITI_ACTIONS_USER_ID"))
 
 settings = Settings()
