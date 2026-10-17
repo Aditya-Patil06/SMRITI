@@ -58,6 +58,8 @@ _last_vector_signature: Optional[Tuple[int, int]] = None
 # auto_error=False allows uniform, explicit 401 handling with WWW-Authenticate: Bearer.
 bearer_scheme = HTTPBearer(scheme_name="BearerAuth", auto_error=False)
 
+WORKSPACE_ID_DESCRIPTION = "Target workspace ID (must be owned by the user)"
+
 
 def check_database_initialized(db: Session) -> None:
     """Verify that required database schema tables exist without executing DDL."""
@@ -167,85 +169,88 @@ def verify_actions_auth(
     return user
 
 
-def refresh_caches_if_needed(db: Session) -> None:
-    """Synchronize process-local vector cache and knowledge graph read-only.
+def _validate_vector_entry(
+    doc_id: str,
+    item: Any,
+    expected_dim: Optional[int],
+) -> None:
+    """Validate structure, dimension, numeric finiteness, and metadata of a cache entry."""
+    if not isinstance(item, dict):
+        raise ValueError(f"Entry '{doc_id}' in vector cache must be an object.")
+    if "vector" not in item:
+        raise ValueError(f"Entry '{doc_id}' missing required 'vector' field.")
 
-    Must be called inside _actions_lock.
-    - Vector index: checks storage/vectors.json signature (st_mtime_ns, st_size) and
-      re-reads the file read-only if it changed. Never saves or rebuilds.
-    - Knowledge graph: synchronizes the graph from DB without a workspace filter
-      so that all workspaces remain queryable and one workspace request cannot
-      purge another workspace's nodes via graph.clear().
-    """
+    vec_raw = item["vector"]
+    if not isinstance(vec_raw, (list, tuple)):
+        raise ValueError(f"Entry '{doc_id}' vector must be a list of floats.")
+    if expected_dim is not None and len(vec_raw) != expected_dim:
+        raise ValueError(
+            f"Entry '{doc_id}' vector dimension mismatch: expected {expected_dim}, got {len(vec_raw)}."
+        )
+
+    for elem in vec_raw:
+        if isinstance(elem, bool) or not isinstance(elem, (int, float)) or not math.isfinite(elem):
+            raise ValueError(f"Entry '{doc_id}' vector contains non-finite or non-numeric element: {elem!r}")
+
+    if "metadata" in item and not isinstance(item["metadata"], dict):
+        raise ValueError(f"Entry '{doc_id}' metadata must be a dictionary.")
+
+
+def _validate_vector_cache_payload(storage_path: str, expected_dim: Optional[int]) -> None:
+    """Read and validate the vector cache JSON file before loading."""
+    try:
+        with open(storage_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("Vector cache payload must be a JSON object mapping doc IDs.")
+
+        for doc_id, item in data.items():
+            _validate_vector_entry(doc_id, item, expected_dim)
+    except Exception as parse_err:
+        logger.exception("Corrupted, malformed, or dimension-incompatible vector store cache file detected")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Memory search cache is currently unavailable.",
+        ) from parse_err
+
+
+def _reload_vector_cache_if_changed(active_vs: Any) -> None:
+    """Check storage/vectors.json signature and reload cache read-only if changed."""
     global _last_vector_signature
 
-    # 1. Read-only vector file signature reload (only for JSON-backed in-memory store)
-    active_vs = get_vector_store()
     storage_path = getattr(vector_store, "storage_path", None)
     load_fn = getattr(vector_store, "load", None)
-    if (
+
+    if not (
         isinstance(active_vs, InMemoryVectorStore)
         and callable(load_fn)
         and storage_path
         and os.path.exists(storage_path)
     ):
-        try:
-            stat_res = os.stat(storage_path)
-            sig = (stat_res.st_mtime_ns, stat_res.st_size)
-            if _last_vector_signature is None or sig != _last_vector_signature:
-                # Pre-validate file read, JSON parsing, and per-entry structure/dimension/types
-                # because InMemoryVectorStore.load() suppresses exceptions and silently clears
-                # vectors to {} on corruption or validation failure.
-                try:
-                    with open(storage_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    if not isinstance(data, dict):
-                        raise ValueError("Vector cache payload must be a JSON object mapping doc IDs.")
+        return
 
-                    # Validate per-entry structure, vector dimension, and metadata
-                    expected_dim = getattr(active_vs.embedding_provider, "dimension", None)
-                    for doc_id, item in data.items():
-                        if not isinstance(item, dict):
-                            raise ValueError(f"Entry '{doc_id}' in vector cache must be an object.")
-                        if "vector" not in item:
-                            raise ValueError(f"Entry '{doc_id}' missing required 'vector' field.")
-                        vec_raw = item["vector"]
-                        if not isinstance(vec_raw, (list, tuple)):
-                            raise ValueError(f"Entry '{doc_id}' vector must be a list of floats.")
-                        if expected_dim is not None and len(vec_raw) != expected_dim:
-                            raise ValueError(
-                                f"Entry '{doc_id}' vector dimension mismatch: expected {expected_dim}, got {len(vec_raw)}."
-                            )
-                        # Verify elements are real, finite numeric values (reject bool, NaN, +/-inf)
-                        for elem in vec_raw:
-                            if isinstance(elem, bool) or not isinstance(elem, (int, float)) or not math.isfinite(elem):
-                                raise ValueError(f"Entry '{doc_id}' vector contains non-finite or non-numeric element: {elem!r}")
-                        # Verify metadata if present
-                        if "metadata" in item and not isinstance(item["metadata"], dict):
-                            raise ValueError(f"Entry '{doc_id}' metadata must be a dictionary.")
-                except Exception as parse_err:
-                    logger.exception("Corrupted, malformed, or dimension-incompatible vector store cache file detected")
-                    raise HTTPException(
-                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                        detail="Memory search cache is currently unavailable.",
-                    ) from parse_err
+    try:
+        stat_res = os.stat(storage_path)
+        sig = (stat_res.st_mtime_ns, stat_res.st_size)
+        if _last_vector_signature is not None and sig == _last_vector_signature:
+            return
 
-                load_fn()
-                _last_vector_signature = sig
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.exception("Error refreshing vector store cache from disk")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Memory search cache is currently unavailable.",
-            ) from exc
+        expected_dim = getattr(active_vs.embedding_provider, "dimension", None)
+        _validate_vector_cache_payload(storage_path, expected_dim)
+        load_fn()
+        _last_vector_signature = sig
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Error refreshing vector store cache from disk")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Memory search cache is currently unavailable.",
+        ) from exc
 
-    # 2. Knowledge graph synchronization (unfiltered)
-    # Rebuilding on every search/context request ensures cross-process freshness
-    # against mutations from the primary API. This is an explicit MVP correctness trade-off
-    # with a performance cost as graph size increases. Note that a brief eventual-consistency
-    # window remains if database transactions and vector file writes occur concurrently in the primary API.
+
+def _sync_knowledge_graph_from_db(db: Session) -> None:
+    """Synchronize the in-memory knowledge graph from the database without filters."""
     try:
         graph_service.sync_from_db(db, workspace_id=None)
     except Exception as exc:
@@ -254,6 +259,21 @@ def refresh_caches_if_needed(db: Session) -> None:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Memory context graph is currently unavailable.",
         ) from exc
+
+
+def refresh_caches_if_needed(db: Session) -> None:
+    """Synchronize process-local vector cache and knowledge graph read-only.
+
+    Must be called inside _actions_lock.
+    - Vector index: checks storage/vectors.json signature (st_mtime_ns, stat_size) and
+      re-reads the file read-only if it changed. Never saves or rebuilds.
+    - Knowledge graph: synchronizes the graph from DB without a workspace filter
+      so that all workspaces remain queryable and one workspace request cannot
+      purge another workspace's nodes via graph.clear().
+    """
+    active_vs = get_vector_store()
+    _reload_vector_cache_if_changed(active_vs)
+    _sync_knowledge_graph_from_db(db)
 
 
 def get_verified_workspace(db: Session, workspace_id: str, user_id: str) -> Workspace:
@@ -369,7 +389,7 @@ def list_workspaces(
 # --- 2. GET /actions/projects ---
 @app.get("/actions/projects", response_model=List[ProjectRead])
 def list_projects(
-    workspace_id: str = Query(..., description="Target workspace ID (must be owned by the user)"),
+    workspace_id: str = Query(..., description=WORKSPACE_ID_DESCRIPTION),
     current_user: User = Depends(verify_actions_auth),
     db: Session = Depends(get_db),
 ):
@@ -387,7 +407,7 @@ def list_projects(
 @app.get("/actions/search", response_model=List[SearchResultItem])
 def search_memories(
     query: str = Query(..., min_length=1, description="Search query string"),
-    workspace_id: str = Query(..., min_length=1, description="Target workspace ID (must be owned by the user)"),
+    workspace_id: str = Query(..., min_length=1, description=WORKSPACE_ID_DESCRIPTION),
     project_id: Optional[str] = Query(None, description="Optional project ID to scope search within workspace"),
     limit: int = Query(15, ge=1, le=20, description="Maximum results to return (1-20)"),
     current_user: User = Depends(verify_actions_auth),
@@ -413,7 +433,7 @@ def search_memories(
 @app.get("/actions/context", response_model=PortableContextPackage)
 def get_context_package(
     query: str = Query(..., min_length=1, description="Query string for relevant context retrieval"),
-    workspace_id: str = Query(..., min_length=1, description="Target workspace ID (must be owned by the user)"),
+    workspace_id: str = Query(..., min_length=1, description=WORKSPACE_ID_DESCRIPTION),
     project_id: Optional[str] = Query(None, description="Optional project ID to scope context package"),
     current_user: User = Depends(verify_actions_auth),
     db: Session = Depends(get_db),

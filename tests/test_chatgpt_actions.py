@@ -151,8 +151,8 @@ def test_fail_closed_when_key_or_user_id_missing(actions_test_db, monkeypatch):
     # Missing API key
     monkeypatch.setenv("SMRITI_ACTIONS_API_KEY", "")
     monkeypatch.setenv("SMRITI_ACTIONS_USER_ID", TEST_ACTIONS_USER_ID)
-    settings.actions_api_key = ""
-    settings.actions_user_id = TEST_ACTIONS_USER_ID
+    monkeypatch.setattr(settings, "actions_api_key", "")
+    monkeypatch.setattr(settings, "actions_user_id", TEST_ACTIONS_USER_ID)
     client = TestClient(actions_app, raise_server_exceptions=False)
     res = client.get("/actions/workspaces", headers={"Authorization": "Bearer any-token"})
     assert res.status_code == 503
@@ -160,8 +160,8 @@ def test_fail_closed_when_key_or_user_id_missing(actions_test_db, monkeypatch):
     # Missing User ID
     monkeypatch.setenv("SMRITI_ACTIONS_API_KEY", TEST_ACTIONS_API_KEY)
     monkeypatch.setenv("SMRITI_ACTIONS_USER_ID", "")
-    settings.actions_api_key = TEST_ACTIONS_API_KEY
-    settings.actions_user_id = ""
+    monkeypatch.setattr(settings, "actions_api_key", TEST_ACTIONS_API_KEY)
+    monkeypatch.setattr(settings, "actions_user_id", "")
     res_user = client.get(
         "/actions/workspaces",
         headers={"Authorization": f"Bearer {TEST_ACTIONS_API_KEY}"},
@@ -179,16 +179,12 @@ def test_unknown_configured_user_fails_startup(tmp_path, monkeypatch):
 
     monkeypatch.setenv("SMRITI_ACTIONS_API_KEY", TEST_ACTIONS_API_KEY)
     monkeypatch.setenv("SMRITI_ACTIONS_USER_ID", "non-existent-user-999")
-    settings.actions_api_key = TEST_ACTIONS_API_KEY
-    settings.actions_user_id = "non-existent-user-999"
+    monkeypatch.setattr(settings, "actions_api_key", TEST_ACTIONS_API_KEY)
+    monkeypatch.setattr(settings, "actions_user_id", "non-existent-user-999")
+    monkeypatch.setattr(actions_module, "SessionLocal", TestingSessionLocal)
 
-    orig_sl = actions_module.SessionLocal
-    actions_module.SessionLocal = TestingSessionLocal
-    try:
-        with pytest.raises(RuntimeError, match="does not exist in the database"):
-            actions_module.validate_startup_configuration()
-    finally:
-        actions_module.SessionLocal = orig_sl
+    with pytest.raises(RuntimeError, match="does not exist in the database"):
+        actions_module.validate_startup_configuration()
 
 
 def test_workspace_listing_enforces_owner_scoping(auth_client):
@@ -315,7 +311,8 @@ def test_openapi_schema_contains_only_four_operations(auth_client):
         assert set(methods.keys()) == {"get"}, f"Path {path} has non-GET methods: {methods.keys()}"
         for method_name, op in methods.items():
             security_reqs = op.get("security")
-            assert security_reqs is not None and len(security_reqs) > 0, f"Operation {method_name.upper()} {path} missing security requirements"
+            assert security_reqs is not None, f"Operation {method_name.upper()} {path} missing security declaration"
+            assert len(security_reqs) > 0, f"Operation {method_name.upper()} {path} has empty security requirements list"
             # Every scheme referenced by an operation's security requirement must exist in components.securitySchemes
             for req in security_reqs:
                 assert isinstance(req, dict)
