@@ -24,7 +24,7 @@ TEST_ACTIONS_USER_ID = "action-user-1"
 
 
 @pytest.fixture
-def actions_test_db(tmp_path) -> Generator[Session, None, None]:
+def actions_test_db(tmp_path, monkeypatch) -> Generator[Session, None, None]:
     """Create an isolated SQLite database and vectors storage for actions tests."""
     db_file = tmp_path / "test_actions.db"
     db_url = f"sqlite:///{db_file}"
@@ -99,7 +99,7 @@ def actions_test_db(tmp_path) -> Generator[Session, None, None]:
             session.close()
 
     actions_app.dependency_overrides[actions_module.get_db] = override_get_db
-    actions_module.SessionLocal = TestingSessionLocal
+    monkeypatch.setattr(actions_module, "SessionLocal", TestingSessionLocal)
 
     yield db
 
