@@ -173,7 +173,7 @@ def build_preflight_report(
 
 def main() -> int:
     """Print the preflight report and return nonzero when setup needs attention."""
-    user_id = (os.getenv("SMRITI_ACTIONS_USER_ID) or settings.actions_user_id or "").strip()
+    user_id = (os.getenv("SMRITI_ACTIONS_USER_ID") or settings.actions_user_id or "").strip()
     if not user_id:
         print("ERROR: Set SMRITI_ACTIONS_USER_ID before running this diagnostic.")
         return 2
