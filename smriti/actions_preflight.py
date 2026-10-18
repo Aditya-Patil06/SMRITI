@@ -12,6 +12,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import func
+
 from smriti.config import settings
 from smriti.models import Memory, Project, SessionLocal, User, Workspace
 from smriti.vector_store import get_vector_store
@@ -43,11 +45,11 @@ def inspect_json_cache(
     if not isinstance(payload, dict):
         return {"kind": "json", "status": "invalid", "path": str(path), "error": "root_not_object"}
 
-    dimensions: Counter[int | str] = Counter()
+    dimensions: Counter[int] = Counter()
     workspace_counts: Counter[str] = Counter()
     malformed = 0
     dimension_mismatches = 0
-    cache_ids = set()
+    cache_ids: set[str] = set()
 
     for memory_id, entry in payload.items():
         cache_ids.add(memory_id)
@@ -68,10 +70,7 @@ def inspect_json_cache(
         if isinstance(workspace_id, str) and workspace_id:
             workspace_counts[workspace_id] += 1
 
-    status = "ok"
-    if malformed or dimension_mismatches:
-        status = "warning"
-
+    status = "warning" if malformed or dimension_mismatches else "ok"
     return {
         "kind": "json",
         "status": status,
@@ -86,7 +85,12 @@ def inspect_json_cache(
     }
 
 
-def build_preflight_report(db, user_id: str, cache_path: str | None, expected_dimension: int | None) -> dict[str, Any]:
+def build_preflight_report(
+    db,
+    user_id: str,
+    cache_path: str | None,
+    expected_dimension: int | None,
+) -> dict[str, Any]:
     """Build a read-only report of user workspaces, memory counts, and cache alignment."""
     user = db.query(User).filter(User.id == user_id).first()
     if user is None:
@@ -99,15 +103,16 @@ def build_preflight_report(db, user_id: str, cache_path: str | None, expected_di
         .all()
     )
     workspace_ids = {workspace.id for workspace in workspaces}
+    owned_workspace_filter = Memory.workspace_id.in_(workspace_ids) if workspace_ids else False
 
     memory_counts = dict(
-        db.query(Memory.workspace_id, __import__("sqlalchemy").func.count(Memory.id))
-        .filter(Memory.workspace_id.in_(workspace_ids) if workspace_ids else False)
+        db.query(Memory.workspace_id, func.count(Memory.id))
+        .filter(owned_workspace_filter)
         .group_by(Memory.workspace_id)
         .all()
     )
     project_counts = dict(
-        db.query(Project.workspace_id, __import__("sqlalchemy").func.count(Project.id))
+        db.query(Project.workspace_id, func.count(Project.id))
         .filter(Project.workspace_id.in_(workspace_ids) if workspace_ids else False)
         .group_by(Project.workspace_id)
         .all()
@@ -116,27 +121,30 @@ def build_preflight_report(db, user_id: str, cache_path: str | None, expected_di
     eligible_memory_ids = {
         row[0]
         for row in db.query(Memory.id)
-        .filter(
-            Memory.workspace_id.in_(workspace_ids) if workspace_ids else False,
-            Memory.status.notin_(( "superseded", "forgotten")),
-        )
+        .filter(owned_workspace_filter, Memory.status.notin_(("superseded", "forgotten")))
+        .all()
+    }
+    all_eligible_memory_ids = {
+        row[0]
+        for row in db.query(Memory.id)
+        .filter(Memory.status.notin_(("superseded", "forgotten")))
         .all()
     }
 
     cache = inspect_json_cache(cache_path, expected_dimension)
     cache_ids = cache.pop("memory_ids", set())
-    missing_cache_ids = sorted(eligible_memory_ids - cache_ids) if cache["kind"] == "json" and cache["status"] != "missing" and cache["status"] != "invalid" else []
-    extra_cache_ids = sorted(cache_ids - eligible_memory_ids) if cache["kind"] == "json" and cache["status"] not in ("missing", "invalid") else []
+    cache_is_comparable = cache["kind"] == "json" and cache["status"] not in ("missing", "invalid")
+    missing_cache_ids = sorted(eligible_memory_ids - cache_ids) if cache_is_comparable else []
+    extra_cache_ids = sorted(cache_ids - all_eligible_memory_ids) if cache_is_comparable else []
 
     workspace_report = []
     for workspace in workspaces:
-        count = int(memory_counts.get(workspace.id, 0))
         workspace_report.append({
             "id": workspace.id,
             "name": workspace.name,
             "is_default": bool(workspace.is_default),
             "projects": int(project_counts.get(workspace.id, 0)),
-            "memories": count,
+            "memories": int(memory_counts.get(workspace.id, 0)),
         })
 
     warnings = []
@@ -149,7 +157,7 @@ def build_preflight_report(db, user_id: str, cache_path: str | None, expected_di
     if missing_cache_ids:
         warnings.append(f"{len(missing_cache_ids)} eligible database memories are absent from the JSON vector cache.")
     if extra_cache_ids:
-        warnings.append(f"{len(extra_cache_ids)} cached memory IDs are not eligible memories in the configured user's workspaces.")
+        warnings.append(f"{len(extra_cache_ids)} cached memory IDs do not match eligible database memories.")
 
     return {
         "status": "warning" if warnings else "ok",
@@ -165,7 +173,7 @@ def build_preflight_report(db, user_id: str, cache_path: str | None, expected_di
 
 def main() -> int:
     """Print the preflight report and return nonzero when setup needs attention."""
-    user_id = (os.getenv("SMRITI_ACTIONS_USER_ID") or settings.actions_user_id or "").strip()
+    user_id = (os.getenv("SMRITI_ACTIONS_USER_ID) or settings.actions_user_id or "").strip()
     if not user_id:
         print("ERROR: Set SMRITI_ACTIONS_USER_ID before running this diagnostic.")
         return 2
